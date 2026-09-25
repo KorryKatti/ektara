@@ -8,29 +8,81 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"bytes"
-
+	"database/sql"
 	"github.com/ebitengine/oto/v3"
 	"github.com/eiannone/keyboard"
 	"github.com/hajimehoshi/go-mp3"
 	"github.com/lrstanley/go-ytdlp"
-	"github.com/raitonoberu/ytsearch"
-	"time"
+	_ "github.com/mattn/go-sqlite3"
+	"log"
 )
 
 func main() {
 	scanner := bufio.NewScanner(os.Stdin)
+	db, err := sql.Open("sqlite3", "songs.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
 
-	fmt.Println("Choose mode:")
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS songs(
+		seq INTEGER PRIMARY KEY AUTOINCREMENT,
+		id TEXT,
+		name TEXT NOT NULL
+	)
+	`)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for {
+		filename := chooseSong(scanner, db)
+		if filename == "" {
+			fmt.Println("Bye!")
+			return
+		}
+		// db insertion
+		dBresult, err := db.Exec(
+			"INSERT INTO songs (id,name) VALUES (?,?)",
+			parseID(filename),
+			filename,
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+		seq, err := dBresult.LastInsertId()
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("New row:", seq)
+
+		if !play(filename) {
+			return
+		}
+
+		fmt.Println("\nFinished:", filename)
+	}
+}
+
+// chooseSong shows the mode menu and returns the selected file,
+// or "" if the user wants to quit / no file was chosen.
+func chooseSong(scanner *bufio.Scanner, db *sql.DB) string {
+	fmt.Println("\nChoose mode:")
 	fmt.Println("1: Online (search & download from YouTube)")
 	fmt.Println("2: Offline (play mp3 files in current directory)")
+	fmt.Println("q: Quit")
 	fmt.Print("> ")
 
 	mode := ""
-	if scanner.Scan() {
-		mode = strings.TrimSpace(scanner.Text())
+	if !scanner.Scan() {
+		return ""
 	}
+	mode = strings.TrimSpace(scanner.Text())
 
 	var filename string
 
@@ -50,23 +102,19 @@ func main() {
 
 		fmt.Println("You entered:", input)
 
-		search := ytsearch.VideoSearch(input)
-
-		result, err := search.Next()
+		videos, _, err := ytdlp.New().
+			FlatPlaylist().
+			ExtractInfo(context.TODO(), fmt.Sprintf("ytsearch%d:%s", limit, input))
 		if err != nil {
 			panic(err)
 		}
 
-		if len(result.Videos) == 0 {
+		if len(videos) == 0 {
 			fmt.Println("No videos found")
-			return
+			return ""
 		}
 
-		// Don't try to take 3 elements if fewer than 3 were returned.
-		if len(result.Videos) < limit {
-		}
-
-		topThreeSlice := result.Videos
+		topThreeSlice := videos
 		if len(topThreeSlice) > limit {
 			topThreeSlice = topThreeSlice[:limit]
 		}
@@ -75,35 +123,47 @@ func main() {
 
 		for i, video := range topThreeSlice {
 			if video != nil {
+				title := ""
+				if video.Title != nil {
+					title = *video.Title
+				}
 				fmt.Printf("%d: ID: %s | Title: %s\n",
 					i+1,
 					video.ID,
-					video.Title,
+					title,
 				)
 			}
 		}
 
-		fmt.Print("\nEnter which song would you like to download: ")
+		fmt.Print("\nEnter which song would you like to download (0 to cancel): ")
 
 		if !scanner.Scan() {
 			fmt.Println("No selection provided")
-			return
+			return ""
 		}
 
 		choice, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
 		if err != nil {
 			fmt.Println("Please enter a number.")
-			return
+			return ""
+		}
+
+		if choice == 0 {
+			return ""
 		}
 
 		if choice < 1 || choice > len(topThreeSlice) {
 			fmt.Println("Invalid choice.")
-			return
+			return ""
 		}
 
 		selectedVideo := topThreeSlice[choice-1]
+		selectedTitle := ""
+		if selectedVideo.Title != nil {
+			selectedTitle = *selectedVideo.Title
+		}
 
-		fmt.Println("You selected:", selectedVideo.Title)
+		fmt.Println("You selected:", selectedTitle)
 
 		url := fmt.Sprintf(
 			"https://www.youtube.com/watch?v=%s",
@@ -112,7 +172,7 @@ func main() {
 
 		fmt.Println("Downloading:", url)
 
-		outputTemplate := "%(extractor)s - %(title)s.%(ext)s"
+		outputTemplate := "%(id)s %(extractor)s - %(title)s.%(ext)s"
 
 		dl := ytdlp.New().
 			ExtractAudio().
@@ -141,7 +201,7 @@ func main() {
 
 		if len(files) == 0 {
 			fmt.Println("No mp3 files found in current directory.")
-			return
+			return ""
 		}
 
 		fmt.Println("\nLocal mp3 files:")
@@ -149,32 +209,72 @@ func main() {
 			fmt.Printf("%d: %s\n", i+1, f)
 		}
 
-		fmt.Print("\nEnter which song would you like to play: ")
+		fmt.Print("\nEnter which song would you like to play (0 to cancel): ")
 
 		if !scanner.Scan() {
 			fmt.Println("No selection provided")
-			return
+			return ""
 		}
 
 		choice, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
 		if err != nil {
 			fmt.Println("Please enter a number.")
-			return
+			return ""
+		}
+
+		if choice == 0 {
+			return ""
 		}
 
 		if choice < 1 || choice > len(files) {
 			fmt.Println("Invalid choice.")
-			return
+			return ""
 		}
 
 		filename = files[choice-1]
 
+	case "q", "Q":
+		return ""
+
 	default:
 		fmt.Println("Unknown choice:", mode)
-		return
+		return ""
 	}
 
-	// music player
+	return filename
+}
+
+// oto allows only one context per process, so we create it once
+// with the first song's sample rate and reuse it afterwards.
+var (
+	otoOnce sync.Once
+	otoCtx  *oto.Context
+	otoErr  error
+)
+
+func getOtoContext(sampleRate int) (*oto.Context, error) {
+	otoOnce.Do(func() {
+		op := &oto.NewContextOptions{
+			SampleRate:   sampleRate,
+			ChannelCount: 2,
+			Format:       oto.FormatSignedInt16LE,
+		}
+		ctx, readyChan, err := oto.NewContext(op)
+		if err != nil {
+			otoErr = err
+			return
+		}
+		// it might take a bit for hardware audio devices to be ready
+		<-readyChan
+		otoCtx = ctx
+		otoErr = ctx.Err()
+	})
+	return otoCtx, otoErr
+}
+
+// play plays one song. Returns true when the song ended on its own
+// (so the menu loop should continue), false when the user quit the app.
+func play(filename string) bool {
 	// read mp3 into memory
 	fileBytes, err := os.ReadFile(filename)
 	if err != nil {
@@ -190,98 +290,92 @@ func main() {
 	}
 
 	// prepare an Oto context ( this will use your default audio device)
-	// play all our sounds. Its configuration can't be changed later
-	// what ???
-	op := &oto.NewContextOptions{}
-	// usually 44100 or 48000. Other values might cause distortions
-	op.SampleRate = 44100
-
-	// 2 - stereo sound
-	op.ChannelCount = 2
-
-	// format of soruce, go-mp3's format is signed 16bit integers.
-	op.Format = oto.FormatSignedInt16LE
-
-	// Remember that you should **not** create more than one context
-	// i guess bro
-	otoCtx, readyChan, err := oto.NewContext(op)
+	// Remember that you should **not** create more than one context,
+	// so the context is created once and reused for every song.
+	otoCtx, err := getOtoContext(decodedMp3.SampleRate())
 	if err != nil {
-		panic("oto.NewContext failed: " + err.Error())
-	}
-	// it might take a biut for hardware audio devvices to be ready , so wait on the channel
-	<-readyChan
-	if err := otoCtx.Err(); err != nil {
-		panic("oto initialization failed : " + err.Error())
+		panic("oto initialization failed: " + err.Error())
 	}
 
-	// create a new player that will handle our sound , paused by default
+	// create a new player that will handle our sound
 	player := otoCtx.NewPlayer(decodedMp3)
-	//play starts playing the sound and returns wtihout waiting for it ( its async)
-
-	commands := make(chan string)
+	defer player.Close()
 
 	start := time.Now()
 	player.Play()
 
-	err = keyboard.Open()
-	if err != nil {
+	if err := keyboard.Open(); err != nil {
 		panic(err)
 	}
-
-	// Always close keyboard properly when program ends.
 	defer keyboard.Close()
+
+	// channel that receives key presses
+	keys := make(chan string)
 
 	// Start a goroutine that listens for keys.
 	go func() {
-
 		for {
-
-			// Wait for a single key press.
-			//
-			// key = the character pressed
-			// _,  = other information we don't need
-			// err = possible error
 			key, _, err := keyboard.GetKey()
-
 			if err != nil {
 				return
 			}
-
-			// Send the key to our main loop.
-			commands <- string(key)
+			keys <- string(key)
 		}
-
 	}()
+
+	paused := false
 
 	for {
 		select {
-		case command := <-commands:
-			switch command {
+		case key := <-keys:
+			switch key {
 			case "p":
-				if player.IsPlaying() {
-
-					player.Pause()
-					fmt.Println("Paused")
-				} else {
+				if paused {
 					player.Play()
+					paused = false
 					fmt.Println("Playing")
+				} else {
+					player.Pause()
+					paused = true
+					fmt.Println("Paused")
 				}
 			case "q":
-				player.Close()
-				return
+				player.PauseAndStopReading()
+				return true // back to menu
 			}
-
 		default:
-			if player.IsPlaying() {
-				elapsed := time.Since(start).Round(time.Second)
-				fmt.Printf("\rCurrent position: %v", elapsed)
+			// song ended on its own -> back to the menu
+			if !player.IsPlaying() && !paused {
+				return true
 			}
+			elapsed := time.Since(start).Round(time.Second)
+			fmt.Printf("\rCurrent position: %v  (p:pause  q:menu)", elapsed)
 			time.Sleep(100 * time.Millisecond)
 		}
-
 	}
-	fmt.Println("\nFinished:", filename)
+}
 
+func parseID(filename string) string {
+	fields := strings.Fields(filename)
+	if len(fields) == 0 {
+		return ""
+	}
+
+	id := fields[0]
+	if len(id) != 11 {
+		return ""
+	}
+
+	for _, char := range id {
+		if (char < 'a' || char > 'z') &&
+			(char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') &&
+			char != '_' && char != '-' {
+			return ""
+		}
+	}
+
+	return id
 }
 
 func lastNonEmptyLine(s string) string {
