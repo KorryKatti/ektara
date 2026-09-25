@@ -19,7 +19,22 @@ import (
 	"github.com/lrstanley/go-ytdlp"
 	_ "github.com/mattn/go-sqlite3"
 	"log"
+
+	"github.com/hugolgst/rich-go/client"
 )
+
+var now = time.Now()
+
+type HistoryItem struct {
+	Seq      int64
+	ID       string
+	Filename string
+}
+
+type History struct {
+	items  []HistoryItem
+	cursor int
+}
 
 func main() {
 	scanner := bufio.NewScanner(os.Stdin)
@@ -29,11 +44,30 @@ func main() {
 	}
 	defer db.Close()
 
+	err = client.Login("1553038133006704670")
+	if err != nil {
+		panic(err)
+	}
+
+	if err := setDiscordIdleActivity(); err != nil {
+		log.Printf("update Discord activity: %v", err)
+	}
+
 	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS songs(
 		seq INTEGER PRIMARY KEY AUTOINCREMENT,
 		id TEXT,
 		name TEXT NOT NULL
+	)
+	`)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS metadata(
+		id TEXT PRIMARY KEY,
+		thumbnail_url TEXT NOT NULL
 	)
 	`)
 	if err != nil {
@@ -61,12 +95,99 @@ func main() {
 		}
 		fmt.Println("New row:", seq)
 
-		if !play(filename) {
+		if err := setDiscordActivity(db, filename); err != nil {
+			log.Printf("update Discord activity: %v", err)
+		}
+
+		keepPlaying := play(db, filename)
+		if err := setDiscordIdleActivity(); err != nil {
+			log.Printf("update Discord activity: %v", err)
+		}
+		if !keepPlaying {
 			return
 		}
 
 		fmt.Println("\nFinished:", filename)
 	}
+}
+
+func setDiscordActivity(db *sql.DB, filename string) error {
+	id := parseID(filename)
+	song := strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))
+	largeImage := "playing"
+
+	var buttons []*client.Button
+	if id != "" {
+		song = strings.TrimSpace(strings.TrimPrefix(song, id))
+		song = strings.TrimSpace(strings.TrimPrefix(song, "youtube - "))
+		thumbnailURL, err := thumbnailURLForID(db, id)
+		if err != nil {
+			return fmt.Errorf("load thumbnail metadata: %w", err)
+		}
+		if thumbnailURL != "" {
+			largeImage = thumbnailURL
+		}
+		buttons = []*client.Button{
+			{
+				Label: "Watch on YouTube",
+				Url:   fmt.Sprintf("https://www.youtube.com/watch?v=%s", id),
+			},
+		}
+	}
+
+	return client.SetActivity(client.Activity{
+		State:      "Listening to music",
+		Details:    song,
+		LargeImage: largeImage,
+		LargeText:  song,
+		SmallImage: "ektara",
+		SmallText:  "Ektara",
+		Timestamps: &client.Timestamps{
+			Start: &now,
+		},
+		Buttons: buttons,
+	})
+}
+
+func thumbnailURLForID(db *sql.DB, id string) (string, error) {
+	if id == "" {
+		return "", nil
+	}
+
+	var thumbnailURL string
+	err := db.QueryRow(
+		"SELECT thumbnail_url FROM metadata WHERE id = ?",
+		id,
+	).Scan(&thumbnailURL)
+	if err == nil {
+		return thumbnailURL, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", err
+	}
+
+	thumbnailURL = fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", id)
+	_, err = db.Exec(
+		"INSERT OR IGNORE INTO metadata (id, thumbnail_url) VALUES (?, ?)",
+		id,
+		thumbnailURL,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	return thumbnailURL, nil
+}
+
+func setDiscordIdleActivity() error {
+	return client.SetActivity(client.Activity{
+		State:      "Idle",
+		Details:    "No song playing",
+		LargeImage: "ektara",
+		LargeText:  "Ektara",
+		SmallImage: "playing",
+		SmallText:  "Idle",
+	})
 }
 
 // chooseSong shows the mode menu and returns the selected file,
@@ -75,6 +196,7 @@ func chooseSong(scanner *bufio.Scanner, db *sql.DB) string {
 	fmt.Println("\nChoose mode:")
 	fmt.Println("1: Online (search & download from YouTube)")
 	fmt.Println("2: Offline (play mp3 files in current directory)")
+	fmt.Println("3: Look at history (play queue)")
 	fmt.Println("q: Quit")
 	fmt.Print("> ")
 
@@ -233,6 +355,11 @@ func chooseSong(scanner *bufio.Scanner, db *sql.DB) string {
 
 		filename = files[choice-1]
 
+	case "3":
+		// history mode
+		fmt.Println("3: History")
+		return historyMode(db)
+
 	case "q", "Q":
 		return ""
 
@@ -242,6 +369,107 @@ func chooseSong(scanner *bufio.Scanner, db *sql.DB) string {
 	}
 
 	return filename
+}
+
+func songAt(db *sql.DB, seq int64) (HistoryItem, error) {
+	var item HistoryItem
+	err := db.QueryRow(
+		`SELECT seq,id,name FROM songs WHERE seq=?`, seq).Scan(&item.Seq, &item.ID, &item.Filename)
+	return item, err
+}
+
+// prevSong returns the song with the largest seq less than `seq`.
+func prevSong(db *sql.DB, seq int64) (HistoryItem, error) {
+	var item HistoryItem
+	err := db.QueryRow(
+		`SELECT seq,id,name FROM songs WHERE seq< ? ORDER BY seq DESC LIMIT 1`, seq).Scan(&item.Seq, &item.ID, &item.Filename)
+	return item, err
+}
+
+// nextSong returns the song with the smallest seq greater than `seq`.
+func nextSong(db *sql.DB, seq int64) (HistoryItem, error) {
+	var item HistoryItem
+	err := db.QueryRow(
+		`SELECT seq, id, name FROM songs WHERE seq > ? ORDER BY seq ASC LIMIT 1`, seq,
+	).Scan(&item.Seq, &item.ID, &item.Filename)
+	return item, err
+}
+
+func historyMode(db *sql.DB) string {
+	// start at newest song
+	var current HistoryItem
+	err := db.QueryRow(
+		`SELECT seq,id,name FROM songs ORDER BY seq DESC LIMIT 1`,
+	).Scan(&current.Seq, &current.ID, &current.Filename)
+	if err == sql.ErrNoRows {
+		fmt.Println("History is empty")
+		return ""
+	}
+	if err != nil {
+		log.Printf("load history : %v", err)
+		return ""
+	}
+	if err := keyboard.Open(); err != nil {
+		panic(err)
+	}
+	defer keyboard.Close()
+
+	for {
+		// draw
+		fmt.Print("\033[H\033[2J") // clear screen
+		fmt.Println("History")
+		fmt.Println()
+		fmt.Printf("  > %s\n", current.Filename)
+		fmt.Println()
+		fmt.Println("a:back  d:forward  Enter:play  q:cancel")
+
+		r, code, err := keyboard.GetKey()
+		if err != nil {
+			return ""
+		}
+
+		// control keys (enter, esc, ...) come back with a zero rune,
+		// so they have to be matched on the key code
+		switch code {
+		case keyboard.KeyEnter, keyboard.KeyCtrlJ:
+			return current.Filename
+		case keyboard.KeyEsc:
+			return ""
+		}
+
+		switch r {
+		case 'a':
+			prev, err := prevSong(db, current.Seq)
+			if err == sql.ErrNoRows {
+				// nothing older stay put
+				continue
+			}
+			if err != nil {
+				log.Printf("prev: %v", err)
+				continue
+			}
+			current = prev
+
+		case 'd':
+			next, err := nextSong(db, current.Seq)
+			if err == sql.ErrNoRows {
+				// nothing newer stay put
+				continue
+			}
+			if err != nil {
+				log.Printf("next: %v", err)
+				continue
+			}
+			current = next
+
+		case '\r', '\n':
+			return current.Filename
+
+		case 'q', 'Q':
+			return ""
+		}
+
+	}
 }
 
 // oto allows only one context per process, so we create it once
@@ -274,7 +502,7 @@ func getOtoContext(sampleRate int) (*oto.Context, error) {
 
 // play plays one song. Returns true when the song ended on its own
 // (so the menu loop should continue), false when the user quit the app.
-func play(filename string) bool {
+func play(db *sql.DB, filename string) bool {
 	// read mp3 into memory
 	fileBytes, err := os.ReadFile(filename)
 	if err != nil {
@@ -309,8 +537,10 @@ func play(filename string) bool {
 	}
 	defer keyboard.Close()
 
-	// channel that receives key presses
-	keys := make(chan string)
+	// channel that receives key presses. buffered so the goroutine can
+	// hand the key over and go back to waiting, which lets keyboard.Close()
+	// cancel it instead of leaving it stuck on the send forever.
+	keys := make(chan string, 1)
 
 	// Start a goroutine that listens for keys.
 	go func() {
@@ -334,10 +564,16 @@ func play(filename string) bool {
 					player.Play()
 					paused = false
 					fmt.Println("Playing")
+					if err := setDiscordActivity(db, filename); err != nil {
+						log.Printf("update Discord activity: %v", err)
+					}
 				} else {
 					player.Pause()
 					paused = true
 					fmt.Println("Paused")
+					if err := setDiscordIdleActivity(); err != nil {
+						log.Printf("update Discord activity: %v", err)
+					}
 				}
 			case "q":
 				player.PauseAndStopReading()
@@ -356,7 +592,7 @@ func play(filename string) bool {
 }
 
 func parseID(filename string) string {
-	fields := strings.Fields(filename)
+	fields := strings.Fields(filepath.Base(strings.TrimSpace(filename)))
 	if len(fields) == 0 {
 		return ""
 	}
