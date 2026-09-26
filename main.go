@@ -26,6 +26,18 @@ import (
 	"os/exec"
 
 	"github.com/hugolgst/rich-go/client"
+
+	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+)
+
+// The TUI rewrite uses these. Each line is here so the file still builds
+// before that package is used, and goes away as it gets used.
+var (
+	_ = list.New
+	_ = tea.NewProgram
+	_ = lipgloss.NewStyle
 )
 
 // Track is one playable thing, either a local mp3 or a YouTube stream.
@@ -94,9 +106,13 @@ func main() {
 	}
 	defer db.Close()
 
-	err = client.Login("1553038133006704670")
-	if err != nil {
-		panic(err)
+	// Discord is optional. Without it the player still works, it just does not
+	// show what is playing, so a login failure is worth a line in the log and
+	// nothing more. The client leaves itself unlogged when the socket cannot
+	// be opened, and quietly ignores every activity update after that, so
+	// there is nothing to clean up here either.
+	if err := client.Login("1553038133006704670"); err != nil {
+		log.Printf("Discord rich presence unavailable: %v", err)
 	}
 
 	if err := setDiscordIdleActivity(); err != nil {
