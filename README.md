@@ -15,9 +15,14 @@ you're listening to as a Discord rich presence.
 ## Requirements
 
 - Go 1.27 or newer
-- `ffmpeg`, **which you have to install yourself** — only needed for streaming.
-  YouTube serves Opus and AAC, never mp3, so a stream cannot be decoded without
-  it. Local files never need it.
+- `ffmpeg`, **which you have to install yourself** — needed for all playback.
+  Local files as much as streams, because the audio device is locked to a single
+  sample rate for the whole session and ffmpeg is what converts to it. YouTube
+  serves Opus and AAC, never mp3, so a stream could not be decoded without it
+  anyway.
+
+`ffprobe` ships inside ffmpeg, so it comes with the same install. It is used to
+find out how long a local file is.
 
 `yt-dlp` is downloaded and installed automatically the first time it is needed,
 so there is nothing to do about that one.
@@ -92,9 +97,15 @@ Everything lands in the directory you ran it from:
 
 **A stream that seeks will stall for a second or two.** YouTube's media urls
 carry a token that expires, so seeking backwards on a stream has to kill ffmpeg
-and resolve a fresh url before it can carry on. Local files seek instantly.
+and resolve a fresh url before it can carry on. A local file has no url to renew,
+so it only pays for the new ffmpeg, which is a few hundred milliseconds.
 
 ## Notes
+
+The audio device is opened once, at one sample rate, and cannot be reopened
+mid-track. Everything is resampled to that rate by ffmpeg as it plays, so a file
+recorded at 44.1kHz sounds right on a 48kHz device. Nothing is decoded in
+process.
 
 The player display repaints a whole frame every 100ms and on every key press,
 built as one string and written in one go, because a frame assembled from

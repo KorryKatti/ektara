@@ -19,7 +19,6 @@ import (
 	"database/sql"
 	"github.com/ebitengine/oto/v3"
 	"github.com/eiannone/keyboard"
-	"github.com/hajimehoshi/go-mp3"
 	"github.com/lrstanley/go-ytdlp"
 	_ "github.com/mattn/go-sqlite3"
 	"log"
@@ -696,25 +695,34 @@ func historyMode(db *sql.DB) (Track, bool) {
 	}
 }
 
-// oto allows only one context per process, so we create it once
-// with the first song's sample rate and reuse it afterwards.
+// oto allows only one context per process, and one context has one sample rate,
+// so the rate is ours to choose rather than the first track's.
 var (
 	otoOnce sync.Once
 	otoCtx  *oto.Context
 	otoErr  error
-	// otoRate is the rate the context was actually created with. Streams have
-	// to be decoded to exactly this rate or they will play at the wrong pitch.
+	// otoRate is the rate the context was created with. Every source has to
+	// produce audio at exactly this rate, because oto does no resampling of its
+	// own: feed it audio recorded at a different rate and it plays at the wrong
+	// speed, and there is no way to notice from here.
 	otoRate int
 )
 
-// defaultSampleRate is the rate the context is created with when a stream is
-// the first thing played, before any file has told us its rate.
-const defaultSampleRate = 44100
+// defaultSampleRate is the rate the context is created with. It is fixed for
+// the whole process, so it is a constant rather than whatever the first track
+// happened to be.
+//
+// 48000 is the rate to fix it at. Most of what this plays is YouTube, which
+// serves 48kHz Opus, and 48kHz is what PipeWire, PulseAudio and Bluetooth all
+// default to, so the common case needs no conversion anywhere. A 44100 file, or
+// a device that wants 44100, is handled by the sound server below us.
+const defaultSampleRate = 48000
 
 // getOtoContext returns the process wide audio context, creating it with
 // sampleRate the first time it is called. Every later caller gets the same one
 // whatever rate it asks for, because oto allows only a single context and the
-// device cannot be reconfigured underneath a playing track.
+// device cannot be reconfigured underneath a playing track. That is why every
+// source is resampled to defaultSampleRate rather than the other way round.
 func getOtoContext(sampleRate int) (*oto.Context, error) {
 	otoOnce.Do(func() {
 		otoRate = sampleRate
@@ -1015,7 +1023,7 @@ func play(db *sql.DB, opts *options, t Track, index int, start time.Time, queue 
 		fmt.Printf("Streaming %s\n", t.Title)
 		src, err = openStream(context.Background(), t)
 	} else {
-		src, err = openLocal(t)
+		src, err = openLocal(context.Background(), t)
 	}
 	if err != nil {
 		log.Printf("play %s: %v", t.label(), err)
@@ -1263,8 +1271,12 @@ func pcmDuration(bytes int64, rate int) time.Duration {
 }
 
 // audioSource is the audio the player reads: signed 16-bit stereo PCM that can
-// be rewound and knows how to be shut down. Both sources have to be seekable,
-// because that is the only way oto's Seek works.
+// be rewound and knows how to be shut down. It has to be seekable, because
+// that is the only way oto's Seek works.
+//
+// The rate it produces is not its own to choose. It has to be the rate the
+// device was opened at, because oto hands the samples straight to the sound
+// server as they are and will not fix a rate that does not match.
 type audioSource interface {
 	io.ReadSeeker
 	// Rate is the sample rate of the PCM this produces
@@ -1275,133 +1287,65 @@ type audioSource interface {
 	Stop()
 }
 
-// localSource plays a local mp3 with go-mp3. Nothing external is involved.
+// openLocal prepares a local file for playback.
 //
-// Seeking is exact and instant rather than a restart of anything: the decoder's
-// Seek takes an offset in PCM bytes and seeks the real file underneath, which
-// is the same unit the position display counts in.
-type localSource struct {
-	*mp3.Decoder // brings Read and SampleRate straight from the decoder
-	file         *os.File
-
-	// atEnd records that a seek landed on the end of the track, so Read can
-	// report the end plainly
-	atEnd bool
-}
-
-func (s *localSource) Rate() int {
-	return s.Decoder.SampleRate()
-}
-
-// Read comes from the decoder and hands over signed 16-bit PCM, whatever
-// channels the file has.
-func (s *localSource) Read(p []byte) (int, error) {
-	// A seek to the very end leaves the decoder holding half of the last frame,
-	// which it then reports as an unexpected EOF rather than a clean one. oto
-	// treats any error other than io.EOF as fatal and stops the player, so the
-	// track would look broken instead of finished. The audio really has run out
-	// here, so say the plain thing.
-	if s.atEnd {
-		return 0, io.EOF
-	}
-
-	return s.Decoder.Read(p)
-}
-
-// Seek clamps the offset before handing it to the decoder.
+// ffmpeg does the decoding here too, for the same reason it does it for a
+// stream: the audio device is locked to one sample rate for the whole process,
+// so whatever comes out of here has to be at that rate whatever the file was
+// recorded at. ffmpeg is told which rate to produce and resamples on the way
+// there. A file decoded in process could not do that, and would play slow or
+// fast whenever its rate was not the one the device was locked to.
 //
-// The decoder finds a frame by indexing a table of frame offsets with the
-// position, and a position past the end of the file runs off the end of that
-// table and panics. Clamping is also the sane answer: k held down near the end
-// just means the track is over.
-func (s *localSource) Seek(offset int64, whence int) (int64, error) {
-	// being asked where we are happens every time the position is drawn, and
-	// has to move nothing
-	if offset == 0 && whence == io.SeekCurrent {
-		return s.Decoder.Seek(0, io.SeekCurrent)
-	}
+// ponytail: this means a local file needs ffmpeg, which it did not before. That
+// is the price of not being wrong about the rate, and ffmpeg is already needed
+// for every stream.
 
-	// the decoder needs a table of frame offsets to seek with, and only builds
-	// one for a seekable file. Ours always is, so this should never trip.
-	length := s.Decoder.Length()
-	if length <= 0 {
-		return 0, fmt.Errorf("cannot seek %q, its length is unknown", s.file.Name())
-	}
-
-	switch whence {
-	case io.SeekStart:
-	case io.SeekCurrent:
-		pos, err := s.Decoder.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return 0, err
-		}
-		offset += pos
-	default:
-		// seeking from the end is not offered, so the position is never a
-		// guess about how long the track is
-		return 0, fmt.Errorf("cannot seek with whence %d", whence)
-	}
-
-	if offset < 0 {
-		offset = 0
-	}
-	if offset > length {
-		offset = length
-	}
-	s.atEnd = offset >= length
-
-	// oto hands the offset straight to the source without checking it against
-	// the length, so the clamp above is what keeps the decoder from panicking
-	landed, err := s.Decoder.Seek(offset, io.SeekStart)
-
-	// asking for the very end is reported as EOF, because there is no frame
-	// there to read. That is not a failure, it is the end of the track: the
-	// next Read runs out of audio and the player stops, which is what k held
-	// down at the end should do.
-	if err == io.EOF && offset >= length {
-		return length, nil
-	}
-
-	return landed, err
-}
-
-// Length shadows the decoder's own Length, which counts pcm bytes rather than
-// returning a time.
-func (s *localSource) Length() time.Duration {
-	return pcmDuration(s.Decoder.Length(), s.Rate())
-}
-
-func (s *localSource) Stop() {
-	s.file.Close()
-}
-
-// openLocal prepares a local mp3 for playback.
-func openLocal(t Track) (audioSource, error) {
-	f, err := os.Open(t.Filename)
+func openLocal(ctx context.Context, t Track) (audioSource, error) {
+	// Ask for the length before anything is spawned, so a file that is missing
+	// or is not audio at all is reported as itself rather than turning into a
+	// track that silently finishes at once. It is worked out once here because
+	// every seek starts ffmpeg again, and ffprobe costs a process of its own.
+	length, err := localDuration(t.Filename)
 	if err != nil {
-		return nil, fmt.Errorf("open %q: %w", t.Filename, err)
+		return nil, err
 	}
 
-	dec, err := mp3.NewDecoder(f)
+	return newFFmpegSource(ctx, func(context.Context) (string, time.Duration, error) {
+		return t.Filename, length, nil
+	})
+}
+
+// localDuration asks ffprobe how long a file is.
+//
+// It is a separate program rather than a guess from the file size, because an
+// mp3 header carries a bitrate and dividing the size by that is only right for
+// a constant bitrate file. ffprobe reads the headers properly, and it ships in
+// the same package as ffmpeg.
+//
+// A file ffprobe can make no sense of is an error, but a file whose length it
+// cannot pin down is not: that is only worth losing the progress bar's total
+// over, so the track plays and the bar counts up without one.
+func localDuration(filename string) (time.Duration, error) {
+	args := []string{
+		"-v", "error",
+		// ask for the container's own idea of how long it is
+		"-show_entries", "format=duration",
+		// print the bare number, so there is nothing to pick out of the output
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		filename,
+	}
+
+	out, err := exec.Command("ffprobe", args...).Output()
 	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("decode %q: %w", t.Filename, err)
+		return 0, fmt.Errorf("ffprobe %q: %w", filename, err)
 	}
 
-	// the device rate is fixed by whatever plays first, and there is no
-	// resampler, so say so rather than let a mismatched file sound wrong
-	if rate := dec.SampleRate(); otoRate != 0 && rate != otoRate {
-		fmt.Printf("Warning: %s is %dHz but the audio device is %dHz, it will sound off pitch\n",
-			t.Filename, rate, otoRate)
+	seconds, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil {
+		return 0, nil
 	}
 
-	// ponytail: a mono mp3 will play at half speed and sound terrible, because
-	// the decoder emits one channel while oto is opened for two. go-mp3 does
-	// not expose the channel count and its frame reader is internal, so there
-	// is no cheap way to spot one. Widen every sample into both channels here
-	// if mono files ever need to work.
-
-	return &localSource{Decoder: dec, file: f}, nil
+	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 // resolveFunc hands ffmpeg something to read and says how long the result is.
@@ -1410,6 +1354,8 @@ func openLocal(t Track) (audioSource, error) {
 type resolveFunc func(ctx context.Context) (input string, duration time.Duration, err error)
 
 // ffmpegSource is a stream of signed 16-bit stereo PCM that can be rewound.
+// Everything that plays goes through one of these, a local file as much as a
+// YouTube stream, because everything has to come out at the same rate.
 //
 // ffmpeg pours audio out of a pipe like water through a hose: once a byte has
 // been read it is gone, so a pipe cannot be rewound. Seek therefore kills the
@@ -1422,7 +1368,7 @@ type ffmpegSource struct {
 	// rate is what ffmpeg was told to produce, which is the rate the audio
 	// device is locked to for the whole process
 	rate int
-	// length is how long the track is, 0 when yt-dlp could not say
+	// length is how long the track is, 0 when nothing could say
 	length time.Duration
 
 	cmd    *exec.Cmd
@@ -1439,15 +1385,18 @@ type ffmpegSource struct {
 // resampled to the rate the audio device is locked to.
 func newFFmpegSource(ctx context.Context, resolve resolveFunc) (*ffmpegSource, error) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return nil, fmt.Errorf("ffmpeg is required to stream: %w", err)
+		return nil, fmt.Errorf("ffmpeg is required to play anything: %w", err)
 	}
 
-	// the rate has to be settled before ffmpeg can be told what to produce,
-	// and the first thing played is what settles it
+	// the rate has to be settled before ffmpeg can be told what to produce, and
+	// it is settled here rather than by the track because it cannot change once
+	// the device is open
 	if _, err := getOtoContext(defaultSampleRate); err != nil {
 		return nil, fmt.Errorf("audio device: %w", err)
 	}
 
+	// whatever rate the context ended up at is the rate ffmpeg has to produce,
+	// which is the same number whether or not something got here first
 	f := &ffmpegSource{ctx: ctx, resolve: resolve, rate: otoRate}
 	if err := f.start(0); err != nil {
 		return nil, err

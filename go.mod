@@ -8,7 +8,6 @@ require (
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/ebitengine/oto/v3 v3.5.1
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
-	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/hugolgst/rich-go v0.0.0-20240715122152-74618cc1ace2
 	github.com/lrstanley/go-ytdlp v1.5.4
 	github.com/mattn/go-sqlite3 v1.14.52
