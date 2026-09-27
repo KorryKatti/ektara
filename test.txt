@@ -1,0 +1,80 @@
+package main
+
+import (
+	"fmt"
+	"image"
+	_ "image/jpeg" // Register JPEG decoder
+	_ "image/png"  // Register PNG decoder
+	"math"
+	"os"
+)
+
+// A scale of characters from darkest (least dense) to brightest (most dense)
+const asciiRamp = " .:-=+*#%@"
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: go run main.go <path-to-image>")
+		return
+	}
+
+	// 1. Open the image file
+	file, err := os.Open(os.Args[1])
+	if err != nil {
+		fmt.Printf("Error opening file: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	// 2. Decode the image
+	img, _, err := image.Decode(file)
+	if err != nil {
+		fmt.Printf("Error decoding image: %v\n", err)
+		return
+	}
+
+	// 3. Define output scale dimensions
+	// Terminal characters are typically twice as tall as they are wide.
+	// We use a scale factor to resize the image so it fits your terminal.
+	bounds := img.Bounds()
+	imgWidth := bounds.Max.X - bounds.Min.X
+	imgHeight := bounds.Max.Y - bounds.Min.Y
+
+	// Adjust targetWidth to match your terminal size (e.g., 80 or 100 columns)
+	targetWidth := 80
+	scale := float64(targetWidth) / float64(imgWidth)
+
+	// Squashing the vertical axis by 0.5 corrects the 2:1 terminal character aspect ratio
+	targetHeight := int(math.Round(float64(imgHeight) * scale * 0.5))
+
+	// 4. Iterate over the scaled grid and print colored ASCII
+	for y := 0; y < targetHeight; y++ {
+		for x := 0; x < targetWidth; x++ {
+			// Map scaled coordinates back to original image space
+			origX := int(float64(x) / scale)
+			origY := int(float64(y) / (scale * 0.5))
+
+			// Get the exact pixel color
+			c := img.At(origX, origY)
+			r, g, b, _ := c.RGBA()
+
+			// Convert 16-bit Go color channel values to standard 8-bit (0-255)
+			r8 := uint8(r >> 8)
+			g8 := uint8(g >> 8)
+			b8 := uint8(b >> 8)
+
+			// Calculate perceived brightness (luminance) using standard formula
+			brightness := 0.2126*float64(r8) + 0.7152*float64(g8) + 0.0722*float64(b8)
+
+			// Map brightness to a index in our ASCII character ramp
+			rampIndex := int((brightness / 255.0) * float64(len(asciiRamp)-1))
+			char := asciiRamp[rampIndex]
+
+			// Print the character using TrueColor ANSI escape sequences:
+			// \x1b[38;2;<r>;<g>;<b>m sets the foreground color
+			fmt.Printf("\x1b[38;2;%d;%d;%dm%c", r8, g8, b8, char)
+		}
+		// Reset terminal color formatting and move to the next line
+		fmt.Print("\x1b[0m\n")
+	}
+}
