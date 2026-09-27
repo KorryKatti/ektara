@@ -3,9 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
-	//"path/filepath"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,6 +57,10 @@ func NewStreamSession(ctx context.Context, pageURL string) (*StreamSession, erro
 	if err := os.MkdirAll(streamDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create stream dir: %w", err)
 	}
+	// Clear out anything left behind by a previous process that did not exit
+	// cleanly. An hour is far longer than any live download can last, so this
+	// cannot step on one.
+	sweepStreamDir(time.Hour)
 	// yt-dlp is not necessarily on PATH, so go-ytdlp resolves it from its own
 	// cache and downloads it if it is not there yet. Everything else in the
 	// program does the same thing through ytdlp.MustInstall
@@ -336,12 +341,18 @@ func (s *StreamSession) Stop() {
 // oh my god man
 // so see i was gonna implement a very simple pseudo buffering but chatgpt said ts pmo sm so now i have to implement + learn some real thing
 func (s *StreamSession) WaitUntil(d time.Duration) error {
-	const poll = 250 * time.Millisecond
 
 	// one second slacking , last packet timestamp is boundary of what we have , ffmpeg -ss d wants audio at or after d
 	// a second past the edge is enough for next packet to land
 	const slack = time.Second
 	want := d + slack
+
+	// poll interval in ns , doubling upto a cap
+	interval := 250 * time.Millisecond
+	const maxInterval = 2 * time.Millisecond
+	const fastPolls = 8
+	polls := 0
+
 	for {
 		// cancelled or finished ? nothing more is coming return please
 		select {
@@ -357,7 +368,59 @@ func (s *StreamSession) WaitUntil(d time.Duration) error {
 		select {
 		case <-s.done:
 			return s.Err()
-		case <-time.After(poll):
+		case <-time.After(interval):
+		}
+		// back off after past polls , doublinf from 250ms to 2s then capped. cap matters cause a slow track shoudnkt turn int a o 10 second poll , download can still finish at any moment and we want to notice prompty aahahaha
+		polls++
+		if polls >= fastPolls && interval < maxInterval {
+			interval *= 2
+			if interval > maxInterval {
+				interval = maxInterval
+			}
+		}
+	}
+}
+
+// sweepStreamDir removes any file in streamDir older than maxAge.
+//
+// Called at the start of every NewStreamSession. The temp files are supposed to
+// be removed by Stop, but a crash, a SIGKILL or a panic leaves them behind, and
+// a program that gets killed often enough fills the disk.
+//
+// The age check, rather than deleting everything, is what keeps two Ektara
+// processes from stepping on each other. A file sitting for an hour is not
+// being written by anything still alive; a file a minute old very well might
+// be.
+//
+// Errors are logged, not returned: a sweep that cannot do its job should not
+// stop a session from starting.
+func sweepStreamDir(maxAge time.Duration) {
+	entries, err := os.ReadDir(streamDir)
+	if err != nil {
+		// The directory does not exist, or is not readable. Either way the
+		// session that follows fails with a clearer error than this would be.
+		return
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			// Nothing in streamDir should be a directory. If one is there it
+			// is not ours, so leave it alone.
+			continue
+		}
+
+		// Info is the only way to get the mod time from a ReadDir entry.
+		info, err := entry.Info()
+		if err != nil {
+			// The file went away between ReadDir and Info. Nothing to do.
+			continue
+		}
+
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(filepath.Join(streamDir, info.Name())); err != nil {
+				log.Printf("sweep %s: %v", info.Name(), err)
+			}
 		}
 	}
 }
