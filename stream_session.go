@@ -14,7 +14,7 @@ import (
 	"github.com/lrstanley/go-ytdlp"
 )
 
-// ponytail: a fixed dir in /tmp so stale files can be found by hand. os.MkdirTemp
+// a fixed dir in /tmp so stale files can be found by hand. os.MkdirTemp
 // would be tidier but leaves the tracks to be cleaned up by the OS instead.
 const streamDir = "/tmp/ektara-streams"
 
@@ -40,6 +40,14 @@ type StreamSession struct {
 	cachedDuration time.Duration
 	// measureAt is when cachedDuration was taken , so we know when to refresh it
 	measuredAt time.Time
+
+	// trackDuration is how long the whole track is, once the download's own
+	// header has been read. It never changes, so it is measured until it is
+	// known and then kept.
+	trackDuration time.Duration
+
+	// seenSize is how big the file was the last time Grown looked at it
+	seenSize int64
 }
 
 // starts downloading pageUrl into a fresh temp file and returns immediately / file grows in bg
@@ -133,6 +141,10 @@ func (s *StreamSession) Wait() error {
 
 // downloaded ruation reports how much audio is currently on disk. return 0 if file empty or ffprobe is stupid ( incomplete webm with no duration header )
 // result cached for half a second , ffprobbe is whole process , UI asks this every 100ms without cache maybe not so good things
+//
+// This is the number for seek bounds: how far there is real audio to seek to.
+// How long the whole track is, which the progress bar wants instead, is
+// TrackDuration.
 func (s *StreamSession) DownloadedDuration() time.Duration {
 	s.mu.Lock()
 	// cache is fresh ?. return
@@ -213,6 +225,98 @@ func measureDuration(path string) time.Duration {
 	return time.Duration(seconds * float64(time.Second))
 }
 
+// measureHeaderDuration is how long the track will be, read from the header the
+// downloader writes before any of the audio.
+//
+// It is the opposite question to measureDuration, so it is the opposite query.
+// The webm header carries the stream's full planned length from the first
+// kilobyte onwards, which is what the progress bar's total wants: a total that
+// stays put while the bar fills. The packets only say how far the audio has got,
+// which is what a seek bound wants.
+//
+// A file with nothing in it yet has no answer rather than a failure, so the
+// error is dropped and the answer is 0. That is the same thing localDuration
+// does with a file whose length it cannot parse, for the same reason: not
+// knowing the length costs the progress bar its total and nothing else.
+func measureHeaderDuration(path string) time.Duration {
+	d, err := localDuration(path)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// TrackDuration is how long the track will be, or 0 while the download has not
+// written a header that says.
+//
+// The header declares the same total for the whole download, so this measures
+// only until it has a number and then keeps it. That matters because the
+// progress bar asks every 100ms, and a fresh reading each time would spawn
+// ffprobe ten times a second for the whole track.
+func (s *StreamSession) TrackDuration() time.Duration {
+	s.mu.Lock()
+	if s.trackDuration > 0 {
+		d := s.trackDuration
+		s.mu.Unlock()
+		return d
+	}
+	s.mu.Unlock()
+
+	// Not known yet, which for the first few seconds means the file is empty
+	// while yt-dlp works out what to download.
+	d := measureHeaderDuration(s.path)
+
+	s.mu.Lock()
+	s.trackDuration = d
+	s.mu.Unlock()
+
+	return d
+}
+
+// Downloading reports whether the downloader is still running.
+//
+// It is half of the answer to "is there more of this track?": the other half is
+// Grown. A downloader that has run out has nothing more to give, so a reader
+// that has everything it downloaded can call the track finished. See
+// streamSource.Read, which is the reader that has to get this right.
+func (s *StreamSession) Downloading() bool {
+	select {
+	case <-s.done:
+		return false
+	default:
+		return true
+	}
+}
+
+// Grown reports whether the downloader has written anything since this was last
+// asked, and remembers how big the file is now.
+//
+// This is how a reader of the file knows to go back for more. It asks about the
+// size rather than about the audio because a stat costs nothing and ffprobe
+// costs a process: this gets asked every time a reader reaches the end of the
+// file, which is every time a download catches up with playback.
+//
+// Asking about size also means the answer cannot be out of date. A cached
+// duration is a reading taken up to half a second ago, and a download that
+// finished inside that half second looks like one that finished with the track
+// part played.
+func (s *StreamSession) Grown() bool {
+	// A file that is not there yet has no size, which is the same answer as a
+	// file with nothing in it: nothing has arrived.
+	size := int64(0)
+	if info, err := os.Stat(s.path); err == nil {
+		size = info.Size()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if size <= s.seenSize {
+		return false
+	}
+	s.seenSize = size
+	return true
+}
+
 // Stop kills the downloader and deletes the temp file. Safe to call more than
 // once. Blocks until the downloader has actually exited, so the file is not
 // deleted out from under a still-writing process.
@@ -225,4 +329,35 @@ func (s *StreamSession) Stop() {
 	<-s.done
 	// Best-effort removal. If it's already gone, that's fine.
 	_ = os.Remove(s.path)
+}
+
+// WaitUntil blocks until the downloaded audio reaches d or the downloader stops whichever comes first
+// returns nil in both cases , the called treates downlaoded ended before d as a normal seek that will hit EOF , not as an error
+// oh my god man
+// so see i was gonna implement a very simple pseudo buffering but chatgpt said ts pmo sm so now i have to implement + learn some real thing
+func (s *StreamSession) WaitUntil(d time.Duration) error {
+	const poll = 250 * time.Millisecond
+
+	// one second slacking , last packet timestamp is boundary of what we have , ffmpeg -ss d wants audio at or after d
+	// a second past the edge is enough for next packet to land
+	const slack = time.Second
+	want := d + slack
+	for {
+		// cancelled or finished ? nothing more is coming return please
+		select {
+		case <-s.done:
+			return s.Err()
+		default:
+		}
+		if s.DownloadedDuration() >= want {
+			return nil
+		}
+
+		// sleep but wake early if downloader stops
+		select {
+		case <-s.done:
+			return s.Err()
+		case <-time.After(poll):
+		}
+	}
 }

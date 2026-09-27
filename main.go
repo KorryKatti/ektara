@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1491,6 +1490,18 @@ func (f *ffmpegSource) Seek(offset int64, whence int) (int64, error) {
 	return offset, nil
 }
 
+// restartAtCurrent throws away the running ffmpeg and starts a new one at the
+// position already reached, without moving that position.
+//
+// Seek cannot do this. It is asked where we are every time the position is
+// drawn, and it leaves the ffmpeg alone when the answer is where it already is.
+// This is the other thing: pick the audio up again from the same place, which a
+// source reading a file that is still growing needs whenever it reaches the end
+// of what has arrived.
+func (f *ffmpegSource) restartAtCurrent() error {
+	return f.start(pcmDuration(f.pos.Load(), f.rate))
+}
+
 func (f *ffmpegSource) Rate() int {
 	return f.rate
 }
@@ -1514,96 +1525,6 @@ func (f *ffmpegSource) Stop() {
 	if msg := strings.TrimSpace(f.stderr.String()); msg != "" {
 		log.Printf("ffmpeg: %s", msg)
 	}
-}
-
-// openStream resolves the YouTube url to a direct media url and plays it.
-// Nothing touches the disk. The resolution is kept as a function because every
-// seek needs a fresh url.
-func openStream(ctx context.Context, t Track) (audioSource, error) {
-	return newFFmpegSource(ctx, func(ctx context.Context) (string, time.Duration, error) {
-		return resolveStream(ctx, t.PageURL)
-	})
-}
-
-// resolveStream asks yt-dlp for the direct, expiring media url behind a youtube
-// watch url, plus how long the track is. It runs as late as possible because
-// the url stops working once its token expires.
-//
-// Sometimes YouTube hands back a url that is already dead, and it reports 403
-// the moment anything tries to read it. A dead url cannot be told apart from a
-// live one by looking at it, so it is fetched for a few bytes and asked again
-// if that fails. A live url answers 206, a dead one answers 403.
-func resolveStream(ctx context.Context, pageURL string) (mediaURL string, duration time.Duration, err error) {
-	const attempts = 3
-
-	var lastErr error
-	for attempt := 1; attempt <= attempts; attempt++ {
-		var url string
-		url, duration, lastErr = resolveOnce(ctx, pageURL)
-		if lastErr != nil {
-			continue
-		}
-
-		dead, err := urlIsDead(ctx, url)
-		if err != nil {
-			lastErr = fmt.Errorf("check %q: %w", pageURL, err)
-			continue
-		}
-		if dead {
-			log.Printf("resolve %q: attempt %d gave a dead url, asking again", pageURL, attempt)
-			lastErr = fmt.Errorf("resolve %q: got a url that is already dead", pageURL)
-			continue
-		}
-
-		return url, duration, nil
-	}
-
-	return "", 0, fmt.Errorf("resolve %q after %d attempts: %w", pageURL, attempts, lastErr)
-}
-
-// resolveOnce is a single yt-dlp lookup.
-func resolveOnce(ctx context.Context, pageURL string) (mediaURL string, duration time.Duration, err error) {
-	infos, _, err := ytdlp.New().
-		Format("bestaudio").
-		ExtractInfo(ctx, pageURL)
-	if err != nil {
-		return "", 0, fmt.Errorf("resolve %q: %w", pageURL, err)
-	}
-	if len(infos) == 0 || infos[0].URL == nil || *infos[0].URL == "" {
-		return "", 0, fmt.Errorf("resolve %q: no audio stream found", pageURL)
-	}
-	if d := infos[0].Duration; d != nil {
-		duration = time.Duration(*d * float64(time.Second))
-	}
-	return *infos[0].URL, duration, nil
-}
-
-// urlIsDead asks the server for the first kilobyte of the stream. Asking for a
-// range rather than the whole thing keeps this cheap, and a few bytes are
-// enough to be told yes or no.
-func urlIsDead(ctx context.Context, mediaURL string) (bool, error) {
-	const probe = "bytes=0-1023"
-
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mediaURL, nil)
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("Range", probe)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false, err
-	}
-	// the body has to be drained and closed so the connection can be reused
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
-
-	// 403 is the one YouTube gives for a url it has decided to stop honouring.
-	// Anything else, including a 206, is treated as working.
-	return resp.StatusCode == http.StatusForbidden, nil
 }
 
 // parseID pulls the YouTube video id out of a downloaded filename, which
