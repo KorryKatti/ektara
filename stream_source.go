@@ -22,13 +22,22 @@ import (
 type streamSource struct {
 	// session owns the download and the file it is writing
 	session *StreamSession
-	// inner is the ffmpeg player decoding the growing file
+	// inner is the ffmpeg player decoding the growing file. It is the
+	// concrete type rather than audioSource because Read restarts it on its own,
+	// which nothing outside this file has any business doing.
 	inner *ffmpegSource
-
 	// stopping is set by Stop, so a Read that is waiting for the download to
 	// catch up gives up at once rather than starting an ffmpeg that nothing is
 	// left to kill.
 	stopping atomic.Bool
+	// warnings carries one-shot messages from Seek to the player's tick
+	// handler, which is how Seek says something without touching the display
+	// itself. Buffered by one so a send never blocks: Seek runs on oto's
+	// goroutine, and a source that made the player wait would stall the audio.
+	// A second warning before the tick reads is dropped, which costs nothing
+	// because the display shows one notice at a time and would overwrite the
+	// first anyway.
+	warnings chan string
 }
 
 // openStream starts downloading t into a temp file and returns a source that
@@ -60,7 +69,26 @@ func openStream(ctx context.Context, t Track) (audioSource, error) {
 		return nil, err
 	}
 
-	return &streamSource{session: session, inner: inner}, nil
+	return &streamSource{session: session, inner: inner, warnings: make(chan string, 1)}, nil
+}
+
+// Warnings returns a channel of one-shot messages for the player to show.
+// Reading it is non-blocking; if nothing is there, nothing happens.
+//
+// This is the only channel the player reads, and it exists so Seek can
+// communicate with the UI tick without the two sharing view directly.
+func (s *streamSource) Warnings() <-chan string {
+	return s.warnings
+}
+
+// warn queues a message for the player. Drops the message if the buffer is
+// full, because the buffer holds one and the player redraws faster than
+// warnings can meaningfully accumulate.
+func (s *streamSource) warn(msg string) {
+	select {
+	case s.warnings <- msg:
+	default:
+	}
 }
 
 // Read plays the file, and starts ffmpeg again whenever it catches up with the
@@ -119,8 +147,24 @@ func (s *streamSource) Read(p []byte) (int, error) {
 	}
 }
 
-// Seek forwards to the inner ffmpegSource, which restarts ffmpeg at the new
-
+// Seek waits for the download to reach the position asked for, then forwards to
+// the inner ffmpegSource, which kills ffmpeg and starts a new one at the new
+// spot.
+//
+// The wait is the point. A seek on a stream is a read of a file that is still
+// being written to, so seeking to somewhere the download has not reached yet
+// would land on nothing. The display asks where we are constantly, though, as
+// Seek(0, SeekCurrent), so a no-move seek returns without touching the session
+// and does not wait at all.
+//
+// ponytail: a seek past the downloaded window is not clamped to what has
+// arrived, it waits for the download. On a track that lands in a few seconds
+// that is under a second of nothing, but on a long track over a slow
+// connection it is silence for as long as the download takes. Clamping against
+// DownloadedDuration is the replacement: the seek would land at the end of what
+// is on disk and go no further. Until then, wait — and when the downloader
+// stops without the target ever arriving, say so rather than letting the
+// position sit at a place that will never play.
 func (s *streamSource) Seek(offset int64, whence int) (int64, error) {
 	if s.stopping.Load() {
 		return 0, fmt.Errorf("stream source stopped")
@@ -153,8 +197,25 @@ func (s *streamSource) Seek(offset int64, whence int) (int64, error) {
 	}
 
 	target := pcmDuration(abs, s.inner.Rate())
-	if err := s.session.WaitUntil(target); err != nil {
+	reached, err := s.session.WaitUntil(target)
+	if err != nil {
 		return 0, err
+	}
+
+	// Not reached means the wait ended because the downloader stopped with the
+	// target still not on disk, so it never will be. ffmpeg produces nothing at
+	// that position, the next Read is the end of the file with no download still
+	// running, and the track finishes. The user sees the position jump and then
+	// silence, which is worth explaining.
+	//
+	// There is deliberately no question asked of the session here. Whether the
+	// target arrived is not something this can work out afterwards: the
+	// downloader is normally gone by now either way, and asking whether it is
+	// still running would call every forward seek over a finished download a
+	// failed one. WaitUntil watched which way the loop left, so it is the one
+	// that says.
+	if !reached {
+		s.warn("seek is past the end of the download")
 	}
 
 	return s.inner.Seek(abs, io.SeekStart)
