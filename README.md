@@ -7,7 +7,8 @@ you're listening to as a Discord rich presence.
 
 - plays `.mp3` files out of a folder on your disk
 - searches YouTube and downloads what it finds
-- streams from YouTube without downloading anything
+- streams from YouTube through a temporary file, which is deleted when the track
+  ends
 - queues several tracks together, from any mix of those sources
 - keeps a history of what you played, in a local SQLite database
 - shows the current track in your Discord status
@@ -22,7 +23,8 @@ you're listening to as a Discord rich presence.
   anyway.
 
 `ffprobe` ships inside ffmpeg, so it comes with the same install. It is used to
-find out how long a local file is.
+find out how long a track is, and, for a stream, how much of it has arrived so
+far.
 
 `yt-dlp` is downloaded and installed automatically the first time it is needed,
 so there is nothing to do about that one.
@@ -51,7 +53,7 @@ The menu asks which of these you want:
 | 1 | search YouTube, download the result, play the downloaded file |
 | 2 | play an mp3 from the current directory |
 | 3 | browse your history and play something from it |
-| 4 | stream from YouTube, downloading nothing to disk |
+| 4 | stream from YouTube, through a temporary file |
 | 5 | build a queue out of several tracks, which can mix all of the above |
 
 Modes 1 to 4 hand back a single track. Only mode 5 gives you more than one, so
@@ -86,21 +88,43 @@ While browsing history, the keys are different:
 
 ## What gets written to disk
 
-Everything lands in the directory you ran it from:
+In the directory you ran it from:
 
 - `songs.db` — your history, plus cover art URLs so repeat plays of the same
   track don't look them up again
 - any mp3s you chose to download
 
+And one place outside it, for streams:
+
+- `/tmp/ektara-streams` — the track currently streaming, deleted when it ends.
+  Anything left there is from a run that did not exit cleanly, and is cleared on
+  the next start.
 
 ## Known limits
 
-**A stream that seeks will stall for a second or two.** YouTube's media urls
-carry a token that expires, so seeking backwards on a stream has to kill ffmpeg
-and resolve a fresh url before it can carry on. A local file has no url to renew,
-so it only pays for the new ffmpeg, which is a few hundred milliseconds.
+**A stream is silent for the first few seconds.** YouTube streams are fetched
+into a temporary file, and `yt-dlp` spends three to five seconds working out what
+to fetch before it writes a single byte. Nothing is wrong when a track starts
+quietly.
+
+**Seeking forward past what has downloaded yet waits for the download.** The
+audio arrives in the background, and skipping to a place the download has not
+reached means waiting there rather than playing silence. A whole YouTube track
+usually lands within a few seconds, so this is normally under a second of
+nothing. On a long track over a slow connection it is longer than that, and the
+position display is the only sign it is happening.
+
+If the download finishes and the place you asked for still is not there, the
+player says `seek is past the end of the download` and the track ends, rather
+than leaving the position sitting somewhere that will never play.
 
 ## Notes
+
+A YouTube stream is downloaded to a temporary file by `yt-dlp` while ffmpeg plays
+out of it, rather than read straight off the network. That costs a few seconds of
+silence at the start, and buys two things: seeking is a read of a file on disk
+instead of a fresh request to YouTube, and it cannot be interrupted by a link
+that expired since the track started.
 
 The audio device is opened once, at one sample rate, and cannot be reopened
 mid-track. Everything is resampled to that rate by ffmpeg as it plays, so a file
@@ -112,4 +136,6 @@ built as one string and written in one go, because a frame assembled from
 separate writes shows half of each frame while it is being drawn.
 
 A rewrite of the interface onto [Bubble Tea](https://charm.land/bubbletea/v2)
-and [Lip Gloss](https://charm.land/lipgloss/v2) is in progress.
+and [Lip Gloss](https://charm.land/lipgloss/v2) is in progress. The dependencies
+are in `go.mod`, but the player display is still drawn by hand, so that part is
+not finished.

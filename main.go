@@ -349,7 +349,7 @@ func chooseSong(scanner *bufio.Scanner, db *sql.DB) ([]Track, bool) {
 	fmt.Println("1: Online (search & download from YouTube)")
 	fmt.Println("2: Offline (play mp3 files in current directory)")
 	fmt.Println("3: Look at history (play queue)")
-	fmt.Println("4: Stream (play from YouTube without downloading)")
+	fmt.Println("4: Stream (play from YouTube via a temporary file)")
 	fmt.Println("5: Queue (play several tracks one after another)")
 	fmt.Println("q: Quit")
 	fmt.Print("> ")
@@ -716,6 +716,12 @@ var (
 // default to, so the common case needs no conversion anywhere. A 44100 file, or
 // a device that wants 44100, is handled by the sound server below us.
 const defaultSampleRate = 48000
+
+// bytesPerFrame is how many bytes of PCM make up one frame of audio: two
+// channels of signed 16-bit. A frame is the smallest thing a position can move
+// by, so every conversion between a byte offset and a playing time counts frames
+// rather than bytes.
+const bytesPerFrame = 2 * 2
 
 // getOtoContext returns the process wide audio context, creating it with
 // sampleRate the first time it is called. Every later caller gets the same one
@@ -1225,7 +1231,6 @@ func play(db *sql.DB, opts *options, t Track, index int, start time.Time, queue 
 // file, which is instant. A stream has to kill ffmpeg and start a new one at
 // the right place, and pick up a fresh media url, which takes a second or two.
 func seekBy(db *sql.DB, player *oto.Player, src audioSource, t Track, start *time.Time, delta time.Duration) {
-	const bytesPerFrame = 2 * 2 // stereo, signed 16-bit
 
 	// where we are now, in pcm bytes
 	from, err := src.Seek(0, io.SeekCurrent)
@@ -1278,7 +1283,6 @@ func playedDuration(src audioSource, player *oto.Player) time.Duration {
 
 // pcmDuration turns a count of PCM bytes into a playing time.
 func pcmDuration(bytes int64, rate int) time.Duration {
-	const bytesPerFrame = 2 * 2 // stereo, signed 16-bit
 	return time.Duration(bytes/bytesPerFrame) * time.Second / time.Duration(rate)
 }
 

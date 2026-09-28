@@ -69,7 +69,11 @@ func openStream(ctx context.Context, t Track) (audioSource, error) {
 		return nil, err
 	}
 
-	return &streamSource{session: session, inner: inner, warnings: make(chan string, 1)}, nil
+	return &streamSource{
+		session:  session,
+		inner:    inner,
+		warnings: make(chan string, 1),
+	}, nil
 }
 
 // Warnings returns a channel of one-shot messages for the player to show.

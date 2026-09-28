@@ -380,7 +380,6 @@ func warningsQueued(s *streamSource) []string {
 // at is a playing time as the byte offset a seek takes, so the tests read in
 // seconds and nothing has to remember the bytes-per-frame arithmetic.
 func at(seconds int) int64 {
-	const bytesPerFrame = 2 * 2 // stereo, signed 16-bit
 	return int64(seconds) * int64(defaultSampleRate) * bytesPerFrame
 }
 
@@ -481,7 +480,7 @@ func copyFirstBytes(t *testing.T, full, path string, frac float64) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := len(data) * int(frac*10) / 10
+	n := int(float64(len(data)) * frac)
 	if err := os.WriteFile(path, data[:n], 0o644); err != nil {
 		t.Fatal(err)
 	}

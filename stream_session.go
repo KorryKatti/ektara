@@ -25,15 +25,18 @@ const streamDir = "/tmp/ektara-streams"
 type StreamSession struct {
 	pageURL string
 	path    string
-	//cancel stops the downlode , its the context's cancel function acallling
-	// it makes exec.CommandContext kill child proceess
+	// cancel stops the downloader. It is the session's own cancel func, so
+	// stopping this session leaves the caller's context alone, and cancelling
+	// through it makes exec.CommandContext kill the child process.
 	cancel context.CancelFunc
 
-	// done is closed when the downloader process has exited , whether it finished or was killed. used by wait and by stop to know when it safe to delete the file
+	// done is closed when the downloader process has exited, whether it finished
+	// or was killed. Wait and Stop both wait on it, and it is also how the
+	// downloader is found to have stopped rather than still running.
 	done chan struct{}
 	// struct empty used to get 0 bytes idk
-	// mu guards teh fields beblow , which are written by downloader
-	// goroutine and read by player goroutine
+	// mu guards the fields below, which are written by the downloader goroutine
+	// and read by the player goroutine.
 	mu sync.Mutex
 	// downloadErr is non nil if downloader fialed , a killed downloader is not an error
 	downloadErr error
@@ -144,24 +147,47 @@ func (s *StreamSession) Wait() error {
 	return s.Err()
 }
 
-// downloaded ruation reports how much audio is currently on disk. return 0 if file empty or ffprobe is stupid ( incomplete webm with no duration header )
-// result cached for half a second , ffprobbe is whole process , UI asks this every 100ms without cache maybe not so good things
+// DownloadedDuration reports how much audio is currently on disk. It is 0 while
+// the file is empty or holds too little for ffprobe to make sense of it.
+//
+// The result is cached for half a second, because ffprobe is a whole process and
+// the display asks for this ten times a second.
 //
 // This is the number for seek bounds: how far there is real audio to seek to.
 // How long the whole track is, which the progress bar wants instead, is
 // TrackDuration.
 func (s *StreamSession) DownloadedDuration() time.Duration {
+	// Read what is cached and when it was taken, then let go of the lock. The
+	// decision about whether to use it is made outside the lock, because ffprobe
+	// takes long enough that holding the lock across it would make everything
+	// else wait for no reason.
 	s.mu.Lock()
-	// cache is fresh ?. return
-	if time.Since(s.measuredAt) < 500*time.Millisecond {
-		d := s.cachedDuration
-		s.mu.Unlock()
-		return d
-	}
+	cached := s.cachedDuration
+	taken := s.measuredAt
 	s.mu.Unlock() // tbhi i think we are overdoing but it is what it is
-	// Measure outside the lock: ffprobe is slow, and we don't want to hold
-	// the mutex while it runs. Two goroutines racing here is fine they'll
-	// both measure and the later one wins.
+
+	if time.Since(taken) < 500*time.Millisecond {
+		return cached
+	}
+
+	// Two goroutines can arrive here together and both will measure. That is
+	// fine: they are measuring the same file, so whichever answer is written
+	// last is a true one.
+	return s.measureNow()
+}
+
+// measureNow asks ffprobe how far the audio on disk goes, and records the answer
+// as the cached one.
+//
+// This is DownloadedDuration without the half second of trust, and it is what a
+// caller wants once the file has stopped growing. While a download is running a
+// reading from a moment ago is close enough, because more is on the way. Once
+// the downloader has exited the file is never going to change again, so a cached
+// reading can be low by the last few hundred milliseconds of audio — and that is
+// exactly where a seek that has just arrived lands. Waiting on a download and
+// asking in the instant it stops is the likeliest moment of all to be handed a
+// number that is out of date.
+func (s *StreamSession) measureNow() time.Duration {
 	d := measureDuration(s.path)
 
 	s.mu.Lock()
@@ -170,29 +196,6 @@ func (s *StreamSession) DownloadedDuration() time.Duration {
 	s.mu.Unlock()
 
 	return d
-}
-
-// finalDuration is DownloadedDuration for a downloader that has exited.
-//
-// The cache exists because ffprobe is a whole process and the display asks how
-// much has downloaded ten times a second. That reasoning only holds while the
-// file is still growing, where a reading a moment old is close enough. Once the
-// downloader has exited the file is never going to change again, so "close
-// enough" is no longer good enough: a cached reading can be low by the last few
-// hundred milliseconds of audio, and that is exactly where a seek that has just
-// arrived lands. Waiting on a download and asking the moment it stops is the
-// most likely moment to be handed a stale number there is.
-//
-// So this drops the cache and measures the finished file. It costs one ffprobe,
-// on a path that has already spent a second or more waiting.
-func (s *StreamSession) finalDuration() time.Duration {
-	s.mu.Lock()
-	// the zero time is far enough in the past that DownloadedDuration's freshness
-	// check fails, which is all that is needed to make it measure again
-	s.measuredAt = time.Time{}
-	s.mu.Unlock()
-
-	return s.DownloadedDuration()
 }
 
 // measureDuration reports how far into the track the data on disk actually
@@ -253,27 +256,6 @@ func measureDuration(path string) time.Duration {
 	return time.Duration(seconds * float64(time.Second))
 }
 
-// measureHeaderDuration is how long the track will be, read from the header the
-// downloader writes before any of the audio.
-//
-// It is the opposite question to measureDuration, so it is the opposite query.
-// The webm header carries the stream's full planned length from the first
-// kilobyte onwards, which is what the progress bar's total wants: a total that
-// stays put while the bar fills. The packets only say how far the audio has got,
-// which is what a seek bound wants.
-//
-// A file with nothing in it yet has no answer rather than a failure, so the
-// error is dropped and the answer is 0. That is the same thing localDuration
-// does with a file whose length it cannot parse, for the same reason: not
-// knowing the length costs the progress bar its total and nothing else.
-func measureHeaderDuration(path string) time.Duration {
-	d, err := localDuration(path)
-	if err != nil {
-		return 0
-	}
-	return d
-}
-
 // TrackDuration is how long the track will be, or 0 while the download has not
 // written a header that says.
 //
@@ -290,9 +272,21 @@ func (s *StreamSession) TrackDuration() time.Duration {
 	}
 	s.mu.Unlock()
 
+	// Asking the container's own idea of the length, which is localDuration, and
+	// not measureDuration. They are the opposite question: the header carries the
+	// stream's full planned length from the first kilobyte onwards, which is what
+	// the progress bar's total wants because it stays put while the bar fills,
+	// whereas the packets only say how far the audio has got, which is what a
+	// seek bound wants.
+	//
 	// Not known yet, which for the first few seconds means the file is empty
-	// while yt-dlp works out what to download.
-	d := measureHeaderDuration(s.path)
+	// while yt-dlp works out what to download. localDuration reports that as an
+	// error, and it is turned into 0 here: not knowing the total costs the
+	// progress bar its total and nothing else.
+	d, err := localDuration(s.path)
+	if err != nil {
+		d = 0
+	}
 
 	s.mu.Lock()
 	s.trackDuration = d
@@ -404,7 +398,7 @@ func (s *StreamSession) WaitUntil(d time.Duration) (bool, error) {
 		// the user their seek went past the end when it plainly did not.
 		select {
 		case <-s.done:
-			return s.finalDuration() >= d, s.Err()
+			return s.measureNow() >= d, s.Err()
 		default:
 		}
 		if s.DownloadedDuration() >= want {
@@ -414,12 +408,22 @@ func (s *StreamSession) WaitUntil(d time.Duration) (bool, error) {
 		// sleep but wake early if downloader stops
 		select {
 		case <-s.done:
-			return s.finalDuration() >= d, s.Err()
+			return s.measureNow() >= d, s.Err()
 		case <-time.After(interval):
 		}
+		// Back off after the first few polls, so a slow download is not asked
+		// ten times a second. The cap matters as much as the backing off: the
+		// download can finish at any moment, and the wait has to notice promptly
+		// rather than sitting on a ten second poll.
+		//
+		// The cap is a clamp on its own, with no `interval < maxInterval` guard
+		// beside it. Two conditions doing one job is one too many, and having
+		// the guard is what let maxInterval be 2ms for as long as it was without
+		// looking wrong — the guard made the whole block quietly skip, so the
+		// number it was limiting was never used.
 		// back off after past polls , doublinf from 250ms to 2s then capped. cap matters cause a slow track shoudnkt turn int a o 10 second poll , download can still finish at any moment and we want to notice prompty aahahaha
 		polls++
-		if polls >= fastPolls && interval < maxInterval {
+		if polls >= fastPolls {
 			interval *= 2
 			if interval > maxInterval {
 				interval = maxInterval
