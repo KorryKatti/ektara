@@ -1191,6 +1191,19 @@ func play(db *sql.DB, opts *options, t Track, index int, start time.Time, queue 
 			if time.Now().After(view.until) {
 				view.notice = ""
 			}
+
+			// Give the source a chance to say something, and show it in this
+			// same frame rather than the next one. The read does not wait: a
+			// source with no message ready gives the default arm at once, and a
+			// local file never implements the interface at all.
+			if w, ok := src.(warner); ok {
+				select {
+				case msg := <-w.Warnings():
+					view.say(msg)
+				default:
+				}
+			}
+
 			view.paused = paused
 			view.muted = muted
 			view.volume = int(current_volume*100.0 + 0.5)
@@ -1284,6 +1297,24 @@ type audioSource interface {
 	Length() time.Duration
 	// Stop releases the file handle, or kills ffmpeg
 	Stop()
+}
+
+// warner is implemented by a source that has something to say to the player that
+// does not fit through Read and Seek — currently only "you seeked past the end
+// of the download, so this is about to stop".
+//
+// It is a separate interface rather than another method on audioSource because
+// only one kind of source has anything to say. The player asks whether the
+// source it was handed is one of those, and a source that is not is silent: a
+// local file has nothing to report, and giving it a channel that never carries
+// anything would be the same as saying nothing with more code.
+//
+// Seek runs on oto's goroutine and the display belongs to the goroutine running
+// play, so neither can touch the other's. The channel is how a value crosses
+// between them, and the player reads it without waiting, so a source that is
+// slow to say something is a source that is not holding up playback.
+type warner interface {
+	Warnings() <-chan string
 }
 
 // openLocal prepares a local file for playback.

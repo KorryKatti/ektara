@@ -70,7 +70,18 @@ func TestMeasureDurationOnTruncatedFile(t *testing.T) {
 
 // this one really downloads from youtube, so it needs a network and it takes
 // as long as youtube takes
+//
+// It is skipped unless EKTARA_NETWORK_TESTS is set, so an ordinary go test ./...
+// is hermetic and fast and does not depend on a website being up. YouTube also
+// rate limits and answers 403 to a client it does not like, and a test that
+// fails for that reason trains you to ignore it. Run it on purpose:
+//
+//	EKTARA_NETWORK_TESTS=1 go test -run TestStreamSession -v .
 func TestStreamSession(t *testing.T) {
+	if os.Getenv("EKTARA_NETWORK_TESTS") == "" {
+		t.Skip("set EKTARA_NETWORK_TESTS=1 to run the test that downloads from YouTube")
+	}
+
 	ctx := context.Background()
 	s, err := NewStreamSession(ctx, "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 	if err != nil {

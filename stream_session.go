@@ -172,6 +172,29 @@ func (s *StreamSession) DownloadedDuration() time.Duration {
 	return d
 }
 
+// finalDuration is DownloadedDuration for a downloader that has exited.
+//
+// The cache exists because ffprobe is a whole process and the display asks how
+// much has downloaded ten times a second. That reasoning only holds while the
+// file is still growing, where a reading a moment old is close enough. Once the
+// downloader has exited the file is never going to change again, so "close
+// enough" is no longer good enough: a cached reading can be low by the last few
+// hundred milliseconds of audio, and that is exactly where a seek that has just
+// arrived lands. Waiting on a download and asking the moment it stops is the
+// most likely moment to be handed a stale number there is.
+//
+// So this drops the cache and measures the finished file. It costs one ffprobe,
+// on a path that has already spent a second or more waiting.
+func (s *StreamSession) finalDuration() time.Duration {
+	s.mu.Lock()
+	// the zero time is far enough in the past that DownloadedDuration's freshness
+	// check fails, which is all that is needed to make it measure again
+	s.measuredAt = time.Time{}
+	s.mu.Unlock()
+
+	return s.DownloadedDuration()
+}
+
 // measureDuration reports how far into the track the data on disk actually
 // reaches.
 //
@@ -336,12 +359,26 @@ func (s *StreamSession) Stop() {
 	_ = os.Remove(s.path)
 }
 
-// WaitUntil blocks until the downloaded audio reaches d or the downloader stops whichever comes first
-// returns nil in both cases , the called treates downlaoded ended before d as a normal seek that will hit EOF , not as an error
-// oh my god man
-// so see i was gonna implement a very simple pseudo buffering but chatgpt said ts pmo sm so now i have to implement + learn some real thing
-func (s *StreamSession) WaitUntil(d time.Duration) error {
-
+// WaitUntil blocks until the downloaded audio reaches d, or the downloader
+// stops, whichever happens first.
+//
+// reached says which of the two it was, and it is the whole point of the return
+// value: the caller cannot work it out for itself. A downloader that has exited
+// looks the same whether it exited after writing the target or a second before
+// it, and by the time the caller has control the downloader is usually gone
+// either way — a YouTube track lands within seconds, so "is it still running"
+// is false on nearly every seek and says nothing at all. Asking the function
+// that watched the loop exit is the only way to tell the two apart.
+//
+// So: reached is true when the target is on disk, and false when the wait ended
+// because nothing more is coming and the target is therefore never going to be.
+// Only this function knows which, because only this function watched.
+//
+// The error is for a download that failed, not for a download that ended early.
+// Ending early is a normal outcome, and a seek past the end of a track is a
+// thing a user does constantly, so it is reported by the bool rather than as a
+// failure.
+func (s *StreamSession) WaitUntil(d time.Duration) (bool, error) {
 	// one second slacking , last packet timestamp is boundary of what we have , ffmpeg -ss d wants audio at or after d
 	// a second past the edge is enough for next packet to land
 	const slack = time.Second
@@ -349,25 +386,35 @@ func (s *StreamSession) WaitUntil(d time.Duration) error {
 
 	// poll interval in ns , doubling upto a cap
 	interval := 250 * time.Millisecond
-	const maxInterval = 2 * time.Millisecond
+	const maxInterval = 2 * time.Second
 	const fastPolls = 8
 	polls := 0
 
 	for {
-		// cancelled or finished ? nothing more is coming return please
+		// Downloader stopped. The target may well be sitting on disk anyway:
+		// the downloader exiting is not the same as the file being short, and a
+		// download that finishes during the wait succeeded. So this measures
+		// rather than assuming.
+		//
+		// Compared against d and not against want. The slack is there so ffmpeg
+		// is handed a whole packet at the position it was asked for, which is
+		// an encoding detail of the seek and not the question the caller is
+		// asking. A seek to a point 400ms before the end of what downloaded
+		// plays those 400ms, and calling that "not reached" would be telling
+		// the user their seek went past the end when it plainly did not.
 		select {
 		case <-s.done:
-			return s.Err()
+			return s.finalDuration() >= d, s.Err()
 		default:
 		}
 		if s.DownloadedDuration() >= want {
-			return nil
+			return true, nil
 		}
 
 		// sleep but wake early if downloader stops
 		select {
 		case <-s.done:
-			return s.Err()
+			return s.finalDuration() >= d, s.Err()
 		case <-time.After(interval):
 		}
 		// back off after past polls , doublinf from 250ms to 2s then capped. cap matters cause a slow track shoudnkt turn int a o 10 second poll , download can still finish at any moment and we want to notice prompty aahahaha
