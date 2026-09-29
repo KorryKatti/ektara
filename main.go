@@ -1,776 +1,1258 @@
 package main
 
+// This file is the whole terminal user interface.
+//
+// The rule everything here follows: the model is a struct, and it is the only
+// thing that remembers anything. Update is handed a message, returns a changed
+// copy of the model plus a command to run later, and View turns the model into
+// text. Nothing else is allowed to draw or read keys.
+//
+// Anything slow (starting ffmpeg, searching YouTube, talking to Discord) is a
+// command, which means a function that runs in the background and hands back a
+// message. That is why there are no sleeps and no blocking calls below.
+
 import (
-	"bufio"
-	"context"
+	"database/sql"
 	"fmt"
 	"io"
-	"math/rand"
+	"log"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
-	"bytes"
-	"database/sql"
-	"github.com/ebitengine/oto/v3"
-	"github.com/eiannone/keyboard"
-	"github.com/lrstanley/go-ytdlp"
-	_ "github.com/mattn/go-sqlite3"
-	"log"
-	"os/exec"
-
-	"github.com/hugolgst/rich-go/client"
-
-	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/ebitengine/oto/v3"
+	"github.com/hugolgst/rich-go/client"
 )
 
-// The TUI rewrite uses these. Each line is here so the file still builds
-// before that package is used, and goes away as it gets used.
-var (
-	_ = list.New
-	_ = tea.NewProgram
-	_ = lipgloss.NewStyle
+// discordAppID is this program's Discord application.
+const discordAppID = "1553038133006704670"
+
+// redrawEvery is how often the player looks at the audio and redraws. Ten times
+// a second is fast enough for a progress bar to look smooth and slow enough to
+// cost nothing.
+const redrawEvery = 100 * time.Millisecond
+
+// ---------------------------------------------------------------------------
+// modes
+// ---------------------------------------------------------------------------
+
+// mode says which screen is on the terminal. Only one at a time.
+type mode int
+
+const (
+	modeMenu    mode = iota // the list of things you can do
+	modeSearch              // typing a name for YouTube, or typing a number
+	modeResults             // picking one of the search results
+	modeFiles               // picking an mp3 in this folder
+	modeHistory             // picking something from the history
+	modePlaying             // the player
 )
 
-// Track is one playable thing, either a local mp3 or a YouTube stream.
-type Track struct {
-	// ID is the YouTube video id, empty for local files that were not
-	// downloaded from YouTube.
-	ID string
-	// Title is what we show the user and report to Discord.
-	Title string
-	// Filename is the local mp3 to decode. Empty when Stream is true.
-	Filename string
-	// PageURL is the canonical youtube.com/watch?v=... address. It is stored
-	// instead of the direct media url because the media url carries an
-	// expiring token and is useless once it lapses. Empty for local files,
-	// which is also how a streamed row is told apart from a downloaded one.
-	PageURL string
-	// Stream plays the audio over the network instead of from disk.
-	Stream bool
+// menuItems are the choices on the first screen, in the order they are shown.
+var menuItems = []string{
+	"Online  - search YouTube and download",
+	"Offline - play an mp3 in this folder",
+	"History - play something already played",
+	"Stream  - play from YouTube without downloading",
+	"Queue   - play several tracks one after another",
+	"Quit",
 }
 
-// shuffleQueue puts the queue in a random order, in place.
+// The indexes of the menu rows, named so the code below can say menuSearch
+// instead of 3 and be obvious about what it means. iota counts up on its own
+// here, so the first one is pinned to 0 and the rest follow.
+const (
+	menuOnline  = iota // 0
+	menuOffline        // 1
+	menuHistory        // 2
+	menuStream         // 3
+	menuQueue          // 4
+	menuQuit           // 5
+)
+
+// ---------------------------------------------------------------------------
+// messages
+// ---------------------------------------------------------------------------
+
+// tickMsg arrives ten times a second. It carries nothing useful: it exists only
+// to say "look at the audio again and redraw".
+type tickMsg time.Time
+
+// trackOpenedMsg says a track finished starting up. It carries the source and
+// the player that were made, or the reason there was none.
+type trackOpenedMsg struct {
+	src    audioSource
+	player *oto.Player
+	err    error
+}
+
+// searchedMsg says a YouTube search finished.
+type searchedMsg struct {
+	videos []video
+	err    error
+}
+
+// downloadedMsg says a download finished.
+type downloadedMsg struct {
+	track Track
+	err   error
+}
+
+// warnMsg is something the audio source wanted to say, like "you seeked past
+// the part that has downloaded so far".
+type warnMsg string
+
+// ---------------------------------------------------------------------------
+// the model
+// ---------------------------------------------------------------------------
+
+// model is everything the program remembers. Update hands back a modified copy
+// of it, and View draws it.
+type model struct {
+	db   *sql.DB
+	opts options
+
+	// which screen is showing
+	mode mode
+
+	// how big the terminal is. 0 means it has not said yet, which is true of
+	// the very first frame.
+	width  int
+	height int
+
+	// --- menu screen ---
+	menuCursor int
+
+	// --- search screen ---
+	// searchInput is the box the user is typing into. It holds whatever they
+	// have typed so far, which is a search name or a number depending on
+	// askingCount.
+	searchInput string
+	// askingCount is true when this screen wants a number rather than a name,
+	// which is what the queue mode uses it for.
+	askingCount bool
+	// searchWasStream remembers whether we came here from "Online" or from
+	// "Stream", because picking a result has to know which to do with it.
+	searchWasStream bool
+	// searching is true from the moment enter is pressed until the results
+	// land, so the screen can say so instead of looking frozen.
+	searching bool
+
+	// --- the three list screens (results, files, history) ---
+	// All three are the same shape: a list of things with a cursor on one of
+	// them, so they share one set of fields instead of three.
+	items      []item
+	itemCursor int
+
+	// --- the queue being built ---
+	// queueWanted is how many tracks are still to be picked. 0 means no queue
+	// is being built and the next pick plays straight away.
+	queueWanted int
+	queue       []Track
+
+	// --- the player ---
+	index   int
+	track   Track
+	src     audioSource
+	player  *oto.Player
+	loading bool
+
+	// paused, muted and volume are the truth about the player. The oto player
+	// is told what they say. They are never set from what the player says back,
+	// because the tick runs ten times a second and would undo every key press.
+	paused bool
+	muted  bool
+	volume float64
+
+	// elapsed and length are copied out of the audio on every tick. Nothing
+	// else sets them.
+	elapsed time.Duration
+	length  time.Duration
+
+	// notice is a short lived message, for "shuffle on" and "volume 60%"
+	notice      string
+	noticeUntil time.Time
+
+	// lastError is the most recent playback failure, kept until something
+	// replaces it. Unlike notice it does not expire on a timer, because a
+	// broken track is skipped straight away and a message that were wiped on
+	// the way to the next one would never get read.
+	lastError string
+
+	// spin counts ticks. It only exists to move the little animation shown
+	// while a background job is running, so it can look alive.
+	spin int
+
+	// startTime is when playback began. Discord is given the same time, which
+	// is what makes its elapsed clock survive a pause.
+	startTime time.Time
+
+	// wasShuffled remembers whether the queue was already shuffled, so turning
+	// shuffle on part way through shuffles only what is left to play.
+	wasShuffled bool
+}
+
+// item is one row in a list screen.
+type item struct {
+	// title is what the row shows.
+	title string
+	// track is what plays if the row is picked.
+	track Track
+	// needsDownload is true for a search result that has to be saved before it
+	// can play. Picking one of those starts a download rather than playing.
+	needsDownload bool
+}
+
+// ---------------------------------------------------------------------------
+// init, update, view
+// ---------------------------------------------------------------------------
+
+// initialModel builds the starting model. It takes the database because
+// everything the program remembers hangs off the model, including the handle it
+// reads the history with.
+func initialModel(db *sql.DB) model {
+	return model{
+		db:   db,
+		mode: modeMenu,
+		opts: options{},
+		// 1.0 is full volume. Starting at 0 would mean a silent player until
+		// the user pressed + twenty times.
+		volume: 1.0,
+	}
+}
+
+// Init is called once at the start. Starting the tick here is what gets the
+// clock running.
+func (m model) Init() tea.Cmd {
+	return tick()
+}
+
+// Update is the whole program: a message arrives, the model changes, and
+// sometimes a command goes out to do something in the background.
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+
+	case tea.WindowSizeMsg:
+		// the terminal has told us how big it is. Nothing else uses this.
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+
+	case tickMsg:
+		return m.onTick()
+
+	case trackOpenedMsg:
+		return m.onTrackOpened(msg)
+
+	case searchedMsg:
+		return m.onSearched(msg)
+
+	case downloadedMsg:
+		return m.onDownloaded(msg)
+
+	case warnMsg:
+		m.say(string(msg))
+		return m, nil
+
+	case tea.KeyPressMsg:
+		return m.onKey(msg)
+	}
+
+	return m, nil
+}
+
+// View draws the model. Which screen it draws is decided by the mode.
 //
-// It swaps each track with a random other track rather than picking a random
-// track to play next, so every track is still heard exactly once and none is
-// left sitting at the end of the queue by accident.
-func shuffleQueue(queue []Track) {
-	for i := range queue {
-		j := rand.Intn(len(queue))
-		queue[i], queue[j] = queue[j], queue[i]
+// The drawing goes to the alternate screen. Without it, a long list such as the
+// history leaves its lower rows behind when esc switches to the shorter menu
+// box: bubbletea erases only as many lines as the new frame has, so the old
+// rows above it stay on screen. The alternate screen is used whole, so every
+// frame starts from a blank screen and nothing can leak between screens.
+func (m model) View() tea.View {
+	var s string
+
+	switch m.mode {
+	case modeMenu:
+		s = m.drawMenu()
+	case modeSearch:
+		s = m.drawSearch()
+	case modeResults, modeFiles, modeHistory:
+		s = m.drawItems()
+	case modePlaying:
+		s = m.drawPlayer()
 	}
+
+	v := tea.NewView(s)
+	v.AltScreen = true
+	return v
 }
 
-// options are the playback options the user can switch on and off with a key
-// while a track is playing. main owns them and passes a pointer into play, so
-// a key press changes what the queue loop does without play needing to know
-// anything about the queue.
-type options struct {
-	// shuffle plays the queue in a random order
-	shuffle bool
-	// repeat starts the queue again once it ends
-	repeat bool
+// ---------------------------------------------------------------------------
+// keys
+// ---------------------------------------------------------------------------
+
+// onKey is the front door for keys. It handles ctrl+c for every screen and then
+// passes the rest to whichever screen is showing.
+func (m model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// ctrl+c always quits. It has to, because a key that only quits from one
+	// screen would trap the user on any other.
+	if msg.String() == "ctrl+c" {
+		return m.quit()
+	}
+
+	switch m.mode {
+	case modeMenu:
+		return m.onMenuKey(msg)
+	case modeSearch:
+		return m.onSearchKey(msg)
+	case modeResults, modeFiles, modeHistory:
+		return m.onListKey(msg)
+	case modePlaying:
+		return m.onPlayerKey(msg)
+	}
+
+	return m, nil
 }
 
-// toggle flips one of the options and says what it became, so the user can
-// see the state without having to remember it. The message is returned rather
-// than printed, because the display is redrawn constantly and anything printed
-// straight to the terminal would be wiped on the next frame.
-func (o *options) toggle(name string, field *bool) string {
-	*field = !*field
-	return fmt.Sprintf("%s %s", name, onOff(*field))
-}
+func (m model) onMenuKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
+		return m.quit()
 
-// label is a short description of where the audio is coming from.
-func (t Track) label() string {
-	if t.Stream {
-		return "stream: " + t.Title
-	}
-	return t.Filename
-}
-
-func main() {
-	scanner := bufio.NewScanner(os.Stdin)
-	db, err := sql.Open("sqlite3", "songs.db")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	// Discord is optional. Without it the player still works, it just does not
-	// show what is playing, so a login failure is worth a line in the log and
-	// nothing more. The client leaves itself unlogged when the socket cannot
-	// be opened, and quietly ignores every activity update after that, so
-	// there is nothing to clean up here either.
-	if err := client.Login("1553038133006704670"); err != nil {
-		log.Printf("Discord rich presence unavailable: %v", err)
-	}
-
-	if err := setDiscordIdleActivity(); err != nil {
-		log.Printf("update Discord activity: %v", err)
-	}
-
-	_, err = db.Exec(`
-	CREATE TABLE IF NOT EXISTS songs(
-		seq INTEGER PRIMARY KEY AUTOINCREMENT,
-		id TEXT,
-		name TEXT NOT NULL
-	)
-	`)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	_, err = db.Exec(`
-	CREATE TABLE IF NOT EXISTS metadata(
-		id TEXT PRIMARY KEY,
-		thumbnail_url TEXT NOT NULL
-	)
-	`)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// url and title are only set for streamed tracks. An empty url is what
-	// marks a row as a local file, so there is no separate flag column.
-	for _, col := range []string{"url TEXT", "title TEXT"} {
-		if _, err := db.Exec("ALTER TABLE songs ADD COLUMN " + col); err != nil &&
-			!strings.Contains(err.Error(), "duplicate column name") {
-			log.Printf("migrate songs: %v", err)
-		}
-	}
-
-	// one set of options for the whole session, so switching shuffle or repeat
-	// on part way through a queue carries over to the next one
-	opts := &options{}
-
-	for {
-		queue, ok := chooseSong(scanner, db)
-		if !ok {
-			fmt.Println("Bye!")
-			return
+	case "up", "k":
+		if m.menuCursor > 0 {
+			m.menuCursor--
 		}
 
-		// shuffle happens once per queue, here, rather than as each track comes
-		// wasShuffled remembers the setting as it was when the queue was last
-		// looked at, so the loop can tell when s has been pressed since. Doing
-		// the shuffle inside the loop on every track would keep the order
-		// changing as you listen, so it only happens on the change.
-		wasShuffled := opts.shuffle
-		if opts.shuffle {
-			shuffleQueue(queue)
+	case "down", "j":
+		if m.menuCursor < len(menuItems)-1 {
+			m.menuCursor++
 		}
 
-		// main holds the position so a and d can move both ways. modes 1-4 hand
-		// back a queue of one, so the loop runs once and a/d do nothing.
-		i := 0
-		playing := true
-		for playing {
-			// shuffle switched on part way through: shuffle what is left to
-			// play, so the change takes effect now without disturbing the
-			// track that is already going.
+	// typing the number jumps straight to that row, so "3" is a shortcut for
+	// moving down twice and pressing enter
+	case "1", "2", "3", "4", "5":
+		m.menuCursor = int(msg.String()[0] - '1')
+		return m.startMenuChoice()
+
+	case "enter":
+		return m.startMenuChoice()
+	}
+
+	return m, nil
+}
+
+// startMenuChoice acts on whichever menu row the cursor is on.
+func (m model) startMenuChoice() (tea.Model, tea.Cmd) {
+	switch m.menuCursor {
+
+	case menuQuit:
+		return m.quit()
+
+	// "Online" and "Stream" both start by asking for a name to look up.
+	// Which one it was is remembered, because picking a result has to know
+	// whether to save it or stream it.
+	case menuOnline, menuStream:
+		m.mode = modeSearch
+		m.searchInput = ""
+		m.askingCount = false
+		m.searchWasStream = m.menuCursor == menuStream
+		return m, nil
+
+	// "Queue" uses the same typing screen, but for a number
+	case menuQueue:
+		m.mode = modeSearch
+		m.searchInput = ""
+		m.askingCount = true
+		return m, nil
+
+	// the mp3s in this folder
+	case menuOffline:
+		tracks, err := localFiles()
+		if err != nil {
+			m.say("Could not list this folder: " + err.Error())
+			return m, nil
+		}
+		if len(tracks) == 0 {
+			m.say("No mp3 files in this folder.")
+			return m, nil
+		}
+		m.mode = modeFiles
+		m.items = tracksToItems(tracks)
+		m.itemCursor = 0
+		return m, nil
+
+	// the history
+	case menuHistory:
+		tracks, err := historyTracks(m.db)
+		if err != nil {
+			m.say("Could not read the history: " + err.Error())
+			return m, nil
+		}
+		if len(tracks) == 0 {
+			m.say("Nothing has been played yet.")
+			return m, nil
+		}
+		m.mode = modeHistory
+		m.items = tracksToItems(tracks)
+		m.itemCursor = 0
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		// leaving while a search is out cancels its result: onSearched only
+		// acts when searching is still true, so a late answer cannot yank the
+		// user back to a screen they walked away from
+		m.searching = false
+		m.mode = modeMenu
+		return m, nil
+
+	case "enter":
+		// one search at a time. A second enter while the first is still out
+		// would start a duplicate request.
+		if m.searching {
+			return m, nil
+		}
+		// the queue screen wants a number, not a name
+		if m.askingCount {
+			return m.startQueue()
+		}
+		if strings.TrimSpace(m.searchInput) == "" {
+			return m, nil
+		}
+		// searching takes a network round trip, so it happens in the
+		// background and the results arrive as a message. searching is set so
+		// the screen shows an animation instead of looking stuck.
+		m.searching = true
+		return m, searchCmd(m.db, m.searchInput)
+
+	case "backspace":
+		if m.searchInput != "" {
+			m.searchInput = m.searchInput[:len(m.searchInput)-1]
+		}
+		return m, nil
+	}
+
+	// anything else that is a plain character gets typed into the box. Typing
+	// is ignored while searching, because the box is no longer the focus.
+	if !m.searching && len(msg.Key().Text) > 0 {
+		m.searchInput += msg.Key().Text
+	}
+	return m, nil
+}
+
+// startQueue reads the number that was typed and starts collecting that many
+// tracks. A queue of one is the same as no queue at all, so it is not treated
+// as one.
+func (m model) startQueue() (tea.Model, tea.Cmd) {
+	n := 0
+	if _, err := fmt.Sscanf(strings.TrimSpace(m.searchInput), "%d", &n); err != nil || n < 1 {
+		m.mode = modeMenu
+		m.say("That is not a number of tracks.")
+		return m, nil
+	}
+
+	if n == 1 {
+		// no queue to build, just go back to the menu for the one pick
+		m.queueWanted = 0
+		m.mode = modeMenu
+		return m, nil
+	}
+
+	m.queueWanted = n
+	m.queue = nil
+	m.mode = modeMenu
+	m.menuCursor = 0
+	return m, nil
+}
+
+func (m model) onListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.mode = modeMenu
+		m.askingCount = false
+		return m, nil
+
+	case "up", "k":
+		if m.itemCursor > 0 {
+			m.itemCursor--
+		}
+
+	case "down", "j":
+		if m.itemCursor < len(m.items)-1 {
+			m.itemCursor++
+		}
+
+	case "enter":
+		if m.itemCursor >= len(m.items) {
+			return m, nil
+		}
+		picked := m.items[m.itemCursor]
+
+		// a search result has to be saved to disk before it can play, so
+		// picking one starts the download and plays it when it lands
+		if picked.needsDownload {
+			m.say("Downloading...")
+			return m, downloadCmd(picked.track.ID, picked.track.Title)
+		}
+
+		// still collecting tracks for a queue: add this one, and if it was the
+		// last one asked for, play what has been collected
+		if m.queueWanted > 0 {
+			m.queue = append(m.queue, picked.track)
+			m.queueWanted--
+			if m.queueWanted == 0 {
+				return m.playQueue(m.queue)
+			}
+			m.mode = modeMenu
+			return m, nil
+		}
+
+		return m.playQueue([]Track{picked.track})
+	}
+
+	return m, nil
+}
+
+func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// while a track is starting, the only key that does anything is one that
+	// gives up and goes back, so a broken track cannot trap the user here
+	if m.loading {
+		if msg.String() == "esc" {
+			return m.backToMenu()
+		}
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "p":
+		if m.paused {
+			m.paused = false
+			if m.player != nil {
+				m.player.Play()
+			}
+			// Discord gets the original start time again, so the time it
+			// counts matches what has actually been heard
+			return m, discordPlayingCmd(m.db, m.track, m.startTime)
+		}
+		m.paused = true
+		if m.player != nil {
+			m.player.Pause()
+		}
+		return m, discordIdleCmd()
+
+	case "h":
+		return m.seek(-5 * time.Second)
+	case "k", "l":
+		return m.seek(5 * time.Second)
+
+	case "a":
+		// no wrap: the first track has nowhere to go back to
+		if m.index > 0 {
+			return m.move(-1)
+		}
+		return m, nil
+	case "d":
+		return m.move(1)
+
+	case "s":
+		m.say(m.opts.toggle("shuffle", &m.opts.shuffle))
+		return m, nil
+	case "r":
+		m.say(m.opts.toggle("repeat", &m.opts.repeat))
+		return m, nil
+
+	case "m":
+		if m.muted {
+			m.muted = false
+		} else {
+			m.muted = true
+		}
+		if m.player != nil {
+			m.player.SetVolume(m.soundVolume())
+		}
+		if m.muted {
+			m.say("muted")
+		} else {
+			m.say("unmuted")
+		}
+		return m, nil
+
+	// = as well as +, because + needs shift and terminals disagree about what
+	// shift and equals sends
+	case "+", "=":
+		m.volume = clampVolume(m.volume + 0.05)
+		if m.player != nil {
+			m.player.SetVolume(m.soundVolume())
+		}
+		m.say(fmt.Sprintf("volume %d%%", int(m.volume*100+0.5)))
+		return m, nil
+	case "-", "_":
+		m.volume = clampVolume(m.volume - 0.05)
+		if m.player != nil {
+			m.player.SetVolume(m.soundVolume())
+		}
+		m.say(fmt.Sprintf("volume %d%%", int(m.volume*100+0.5)))
+		return m, nil
+
+	case "q":
+		return m.backToMenu()
+	}
+
+	return m, nil
+}
+
+// soundVolume is what to actually hand oto: zero while muted, otherwise the
+// volume. The volume number stays where it was while muted, which is what makes
+// unmuting give back the level that was set rather than silence.
+func (m model) soundVolume() float64 {
+	if m.muted {
+		return 0
+	}
+	return m.volume
+}
+
+func clampVolume(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// ---------------------------------------------------------------------------
+// starting, stopping and moving between tracks
+// ---------------------------------------------------------------------------
+
+// playQueue is the one place a queue starts playing. Everything else ends up
+// here: a single pick from a list, or the queue the user built up.
+func (m model) playQueue(queue []Track) (tea.Model, tea.Cmd) {
+	m.queue = queue
+	m.index = 0
+	m.queueWanted = 0
+	m.mode = modePlaying
+
+	// shuffle happens once, here, rather than on every track. Doing it per
+	// track would keep changing the order as you listen.
+	m.wasShuffled = m.opts.shuffle
+	if m.opts.shuffle {
+		shuffleQueue(m.queue)
+	}
+
+	return m, m.startTrack()
+}
+
+// startTrack sets the model up for the current position in the queue and goes
+// off to open the audio. It does not open it here, because opening is slow and
+// doing it inline would freeze the display.
+func (m *model) startTrack() tea.Cmd {
+	m.stopTrack()
+
+	// the index is wrapped with the queue length, so repeat can go round again
+	m.track = m.queue[m.index%len(m.queue)]
+
+	m.startTime = time.Now()
+	m.elapsed = 0
+	m.length = 0
+	m.paused = false
+	m.muted = false
+	m.loading = true
+	m.notice = ""
+
+	// Discord is told straight away rather than waiting for the audio to be
+	// ready, because opening a stream takes a second and a presence that lags
+	// behind the music looks broken.
+	//
+	// No tick here. onTick returns one on every path out of itself, so the
+	// chain started by Init is already running and keeps itself running.
+	// Returning another one from here starts a second chain that also keeps
+	// itself running, and the two never meet. Every play and every trip back to
+	// the menu would leave one more behind, so the display would redraw faster
+	// and faster for the rest of the session.
+	return tea.Batch(openTrackCmd(m.track), discordPlayingCmd(m.db, m.track, m.startTime))
+}
+
+// stopTrack shuts the audio down.
+//
+// The order matters. The player is stopped before the source, because the
+// source is the thing the player is reading from. The other way round leaves
+// ffmpeg writing into a pipe nobody is reading.
+//
+// Every path that leaves a track goes through here. There are no defers in this
+// code, because the function that used to have them returns immediately now
+// and nothing would ever run them.
+func (m *model) stopTrack() {
+	if m.player != nil {
+		m.player.PauseAndStopReading()
+		m.player.Close()
+		m.player = nil
+	}
+	if m.src != nil {
+		// this kills ffmpeg, which is what stops a stream downloading in the
+		// background after the user has moved on
+		m.src.Stop()
+		m.src = nil
+	}
+}
+
+// move goes one track forwards or backwards and starts the new one.
+func (m model) move(delta int) (tea.Model, tea.Cmd) {
+	m.index += delta
+
+	// past the end: repeat starts again, otherwise the queue is over
+	if m.index >= len(m.queue) {
+		if !m.opts.repeat {
+			return m.backToMenu()
+		}
+		m.index = 0
+	}
+
+	// shuffle switched on part way through: shuffle what is left to play, so
+	// the change takes effect now without disturbing the track already going.
+	//
+	// The index is wrapped, because with repeat on the index can be past the
+	// end already, and handing shuffleQueue an empty slice makes it ask the
+	// random number generator to pick a number out of nothing.
+	if m.opts.shuffle && !m.wasShuffled {
+		shuffleQueue(m.queue[m.index%len(m.queue):])
+	}
+	m.wasShuffled = m.opts.shuffle
+
+	return m, m.startTrack()
+}
+
+// backToMenu stops the audio and shows the menu again.
+func (m model) backToMenu() (tea.Model, tea.Cmd) {
+	m.stopTrack()
+	m.mode = modeMenu
+	m.queue = nil
+	m.queueWanted = 0
+	m.loading = false
+
+	// Discord goes to idle once, here, rather than between every pair of
+	// tracks, or the presence flickers in the gap.
+	//
+	// No tick here either, for the same reason startTrack does not return one.
+	return m, discordIdleCmd()
+}
+
+// quit stops the audio and ends the program.
+//
+// The audio is stopped here, right now, before tea.Quit is returned, and not
+// from inside a command. A command runs in a goroutine and would race the
+// program shutting down around it, which can leave the audio device held open
+// while the terminal is being put back.
+func (m model) quit() (tea.Model, tea.Cmd) {
+	m.stopTrack()
+	return m, tea.Quit
+}
+
+func (m model) seek(delta time.Duration) (tea.Model, tea.Cmd) {
+	if m.player == nil || m.src == nil {
+		return m, nil
+	}
+	// the Discord start time moves with the seek, so the elapsed time on the
+	// presence keeps matching what is actually being heard
+	m.startTime = seekBy(m.player, m.src, m.startTime, delta)
+	return m, discordPlayingCmd(m.db, m.track, m.startTime)
+}
+
+// ---------------------------------------------------------------------------
+// the tick
+// ---------------------------------------------------------------------------
+
+// onTick runs ten times a second. It does a few cheap things: nudges the busy
+// animation along, sees whether the track has finished, copies the playback
+// position into the model so the display can show it, and sets the next tick
+// going.
+//
+// Every single path out of here returns tick(). That is the whole point of the
+// function. A path that returns nil instead kills the clock for good: no more
+// ticks arrive, the progress bar freezes, and nothing complains about it. The
+// program starts on the menu where there is no audio to look at, so that early
+// exit is not a corner case, it is the first thing that happens every run.
+func (m model) onTick() (tea.Model, tea.Cmd) {
+	// the tick also drives the little "busy" animation, so it is counted here
+	// before any of the early exits below
+	m.spin++
+
+	// nothing to watch unless a track is actually open
+	if m.mode != modePlaying || m.loading || m.player == nil || m.src == nil {
+		return m, tick()
+	}
+
+	// the track finished, or it broke
+	if !m.player.IsPlaying() && !m.paused {
+		if err := m.player.Err(); err != nil {
+			// A source that broke stops the player with an error on it, which
+			// is not the same as reaching the end of the track. Only a clean
+			// finish earns a history row, or every track that failed to stream
+			// would end up in it.
+			log.Printf("play %s: %v", m.track.label(), err)
+			m.lastError = "Playback failed: " + err.Error()
+
+			// Move on rather than sit here. Leaving the failed player in the
+			// model means the next tick arrives, finds the same stopped player
+			// carrying the same error, and does all of this again: ten times a
+			// second, for as long as the app is left open. That is what filled
+			// the log with eighty five megabytes of one repeated error.
 			//
-			// The index is wrapped, because with repeat on i can be past the
-			// end of the queue already and the next track to play is the one
-			// at the start, which leaves the whole queue to shuffle. Without
-			// the wrap that hands shuffleQueue an empty slice and it panics
-			// on the random number it is asked for.
-			if opts.shuffle && !wasShuffled {
-				shuffleQueue(queue[i%len(queue):])
-			}
-			wasShuffled = opts.shuffle
-
-			// i is wrapped with the queue length so repeat can go round again,
-			// and so i stays a plain count of tracks played
-			track := queue[i%len(queue)]
-
-			// one clock read per track, shared by the Discord presence and the
-			// position display so both agree on when playback started
-			start := time.Now()
-
-			if err := setDiscordActivity(db, track, start); err != nil {
-				log.Printf("update Discord activity: %v", err)
-			}
-
-			goWhere, playedIt := play(db, opts, track, i%len(queue), start, queue)
-			if playedIt {
-				logSong(db, track)
-			}
-
-			switch goWhere {
-			case "next":
-				i++
-				// the end of the queue normally means the end of the music.
-				// with repeat it just means round again, which is what the
-				// wrap in the loop above is for.
-				if i >= len(queue) && !opts.repeat {
-					playing = false
-				}
-			case "prev":
-				if i > 0 {
-					i--
-				}
-			case "menu":
-				playing = false
-			}
+			// move() leads to startTrack(), which calls stopTrack() and clears
+			// the player, so there is nothing left here to fail a second time.
+			return m.move(1)
 		}
+		// it played all the way through, so it goes in the history.
+		// move() starts the next tick going itself, by returning tick().
+		logSong(m.db, m.track)
+		return m.move(1)
+	}
 
-		// only once the whole queue is done, otherwise the presence flickers
-		// to idle in the gap between two queued tracks
+	// copy the position in. Nothing else knows where playback is, so this is
+	// the only place the display can get it from.
+	m.elapsed = playedDuration(m.src, m.player)
+	m.length = m.src.Length()
+
+	// a notice with no expiry would be wiped a tenth of a second after the key
+	// that made it, which is too fast to read
+	if m.notice != "" && time.Now().After(m.noticeUntil) {
+		m.notice = ""
+	}
+
+	return m, tick()
+}
+
+// say puts a message on the display for a couple of seconds, which is long
+// enough to read and short enough not to sit there for the rest of the track.
+func (m *model) say(msg string) {
+	m.notice = msg
+	m.noticeUntil = time.Now().Add(2 * time.Second)
+}
+
+// ---------------------------------------------------------------------------
+// the results of the slow commands
+// ---------------------------------------------------------------------------
+
+func (m model) onTrackOpened(msg trackOpenedMsg) (tea.Model, tea.Cmd) {
+	m.loading = false
+
+	if msg.err != nil {
+		log.Printf("open %s: %v", m.track.label(), msg.err)
+		m.lastError = "Could not play " + m.track.label()
+		// carry on to the next one rather than sitting on a dead screen
+		return m.move(1)
+	}
+
+	// it opened, so whatever went wrong last is no longer what is happening
+	m.lastError = ""
+
+	m.src = msg.src
+	m.player = msg.player
+	m.length = msg.src.Length()
+
+	// the volume is whatever the player is already at, not whatever this model
+	// happened to be holding, so a new track does not reset the level
+	m.volume = msg.player.Volume()
+	m.player.SetVolume(m.soundVolume())
+
+	// a source that has something to say gets a goroutine waiting to say it
+	return m, listenCmd(msg.src)
+}
+
+func (m model) onSearched(msg searchedMsg) (tea.Model, tea.Cmd) {
+	// the user pressed esc and left while this search was still out, so this
+	// answer is stale and must not reopen the screen
+	if !m.searching {
+		return m, nil
+	}
+	m.searching = false
+
+	if msg.err != nil {
+		m.say("Search failed: " + msg.err.Error())
+		m.mode = modeMenu
+		return m, nil
+	}
+	if len(msg.videos) == 0 {
+		m.say("No videos found.")
+		m.mode = modeMenu
+		return m, nil
+	}
+
+	// each result becomes a list row. A result from "Stream" is ready to play
+	// as it is; one from "Online" has to be downloaded first.
+	items := make([]item, 0, len(msg.videos))
+	for _, v := range msg.videos {
+		row := item{title: v.Title, track: Track{ID: v.ID, Title: v.Title}}
+		if m.searchWasStream {
+			row.track.PageURL = "https://www.youtube.com/watch?v=" + v.ID
+			row.track.Stream = true
+		} else {
+			row.needsDownload = true
+		}
+		items = append(items, row)
+	}
+
+	m.items = items
+	m.itemCursor = 0
+	m.mode = modeResults
+	return m, nil
+}
+
+func (m model) onDownloaded(msg downloadedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.say("Download failed: " + msg.err.Error())
+		m.mode = modeMenu
+		return m, nil
+	}
+	return m.playQueue([]Track{msg.track})
+}
+
+// ---------------------------------------------------------------------------
+// commands: work that happens in the background
+// ---------------------------------------------------------------------------
+
+// tick waits a moment and then sends a tickMsg, which makes the model look at
+// the audio again.
+func tick() tea.Cmd {
+	return tea.Tick(redrawEvery, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
+// openTrackCmd starts a track's audio in the background and sends back what it
+// made. Opening a local file spawns ffmpeg, and opening a stream resolves a
+// fresh YouTube url first, so this takes long enough that doing it inline would
+// freeze the screen.
+func openTrackCmd(t Track) tea.Cmd {
+	return func() tea.Msg {
+		src, player, err := openTrack(t)
+		return trackOpenedMsg{src: src, player: player, err: err}
+	}
+}
+
+// searchCmd runs a YouTube search in the background.
+func searchCmd(db *sql.DB, query string) tea.Cmd {
+	return func() tea.Msg {
+		videos, err := searchYouTube(db, query)
+		return searchedMsg{videos: videos, err: err}
+	}
+}
+
+// downloadCmd saves a video as an mp3 in the background.
+func downloadCmd(id, title string) tea.Cmd {
+	return func() tea.Msg {
+		track, err := downloadVideo(id, title)
+		return downloadedMsg{track: track, err: err}
+	}
+}
+
+// listenCmd waits for the audio source to say something and passes it on as a
+// message. It sits there until the source speaks or the track is stopped, which
+// is fine: one goroutine per track, thrown away with the track.
+//
+// A local file is not a warner, so it never has anything to say and this
+// returns nothing rather than a goroutine waiting forever.
+func listenCmd(src audioSource) tea.Cmd {
+	w, ok := src.(warner)
+	if !ok {
+		return nil
+	}
+	return func() tea.Msg {
+		return warnMsg(<-w.Warnings())
+	}
+}
+
+// discordPlayingCmd tells Discord what is playing. It talks to a socket and
+// looks a cover image up in the database, so it is a command too.
+func discordPlayingCmd(db *sql.DB, t Track, start time.Time) tea.Cmd {
+	return func() tea.Msg {
+		if err := setDiscordActivity(db, t, start); err != nil {
+			log.Printf("update Discord activity: %v", err)
+		}
+		return nil
+	}
+}
+
+// discordIdleCmd tells Discord nothing is playing.
+func discordIdleCmd() tea.Cmd {
+	return func() tea.Msg {
 		if err := setDiscordIdleActivity(); err != nil {
 			log.Printf("update Discord activity: %v", err)
 		}
+		return nil
 	}
 }
 
-// setDiscordActivity shows t as the thing being played, with its cover and a
-// link back to YouTube. start is when playback began, not when the presence was
-// written, so the elapsed time Discord shows survives a pause and resume.
-func setDiscordActivity(db *sql.DB, t Track, start time.Time) error {
-	song := t.Title
-	largeImage := "playing"
+// ---------------------------------------------------------------------------
+// drawing
+// ---------------------------------------------------------------------------
 
-	var buttons []*client.Button
-	if t.ID != "" {
-		thumbnailURL, err := thumbnailURLForID(db, t.ID)
-		if err != nil {
-			return fmt.Errorf("load thumbnail metadata: %w", err)
-		}
-		if thumbnailURL != "" {
-			largeImage = thumbnailURL
-		}
-		pageURL := t.PageURL
-		if pageURL == "" {
-			pageURL = "https://www.youtube.com/watch?v=" + t.ID
-		}
-		buttons = []*client.Button{
-			{
-				Label: "Watch on YouTube",
-				Url:   pageURL,
-			},
-		}
-	}
-
-	return client.SetActivity(client.Activity{
-		State:      "Listening to music",
-		Details:    song,
-		LargeImage: largeImage,
-		LargeText:  song,
-		SmallImage: "ektara",
-		SmallText:  "Ektara",
-		Timestamps: &client.Timestamps{
-			Start: &start,
-		},
-		Buttons: buttons,
-	})
-}
-
-// thumbnailURLForID returns the cover image for a YouTube video, remembering
-// the answer in the metadata table so repeat plays do not hit the database's
-// default construction twice.
-func thumbnailURLForID(db *sql.DB, id string) (string, error) {
-	if id == "" {
-		return "", nil
-	}
-
-	var thumbnailURL string
-	err := db.QueryRow(
-		"SELECT thumbnail_url FROM metadata WHERE id = ?",
-		id,
-	).Scan(&thumbnailURL)
-	if err == nil {
-		return thumbnailURL, nil
-	}
-	if err != sql.ErrNoRows {
-		return "", err
-	}
-
-	thumbnailURL = fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", id)
-	_, err = db.Exec(
-		"INSERT OR IGNORE INTO metadata (id, thumbnail_url) VALUES (?, ?)",
-		id,
-		thumbnailURL,
-	)
-	if err != nil {
-		return "", err
-	}
-
-	return thumbnailURL, nil
-}
-
-// setDiscordIdleActivity clears the playing song and shows nothing instead. It
-// is written whenever audio stops, so a stale presence cannot outlive the
-// track it names.
-func setDiscordIdleActivity() error {
-	return client.SetActivity(client.Activity{
-		State:      "Idle",
-		Details:    "No song playing",
-		LargeImage: "ektara",
-		LargeText:  "Ektara",
-		SmallImage: "playing",
-		SmallText:  "Idle",
-	})
-}
-
-// logSong records a track in the history. It is called after the track has
-// played rather than before, so the history shows what was listened to rather
-// than what was queued.
-func logSong(db *sql.DB, t Track) {
-	res, err := db.Exec(
-		"INSERT INTO songs (id,name,url,title) VALUES (?,?,?,?)",
-		t.ID,
-		t.Filename,
-		t.PageURL,
-		t.Title,
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	seq, err := res.LastInsertId()
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("New row:", seq)
-	fmt.Println("\nFinished:", t.label())
-}
-
-// chooseSong shows the mode menu and returns the tracks to play, in order.
-// Modes 1-4 return a single track; mode 5 returns a whole queue. ok is false
-// when the user quits or nothing was chosen.
-func chooseSong(scanner *bufio.Scanner, db *sql.DB) ([]Track, bool) {
-	fmt.Println("\nChoose mode:")
-	fmt.Println("1: Online (search & download from YouTube)")
-	fmt.Println("2: Offline (play mp3 files in current directory)")
-	fmt.Println("3: Look at history (play queue)")
-	fmt.Println("4: Stream (play from YouTube via a temporary file)")
-	fmt.Println("5: Queue (play several tracks one after another)")
-	fmt.Println("q: Quit")
-	fmt.Print("> ")
-
-	mode := ""
-	if !scanner.Scan() {
-		return nil, false
-	}
-	mode = strings.TrimSpace(scanner.Text())
-
-	switch mode {
-	case "1":
-		// Install/cache yt-dlp if it isn't installed yet.
-		ytdlp.MustInstall(context.TODO(), nil)
-
-		id, title, ok := pickVideo(scanner, "download")
-		if !ok {
-			return nil, false
-		}
-		pageURL := "https://www.youtube.com/watch?v=" + id
-
-		fmt.Println("Downloading:", pageURL)
-
-		outputTemplate := "%(id)s %(extractor)s - %(title)s.%(ext)s"
-
-		dl := ytdlp.New().
-			ExtractAudio().
-			AudioFormat("mp3").
-			Output(outputTemplate).
-			Print("after_move:filepath")
-
-		res, err := dl.Run(context.TODO(), pageURL)
-		if err != nil {
-			fmt.Println("Download failed:", err)
-			return nil, false
-		}
-
-		filename := lastNonEmptyLine(res.Stdout)
-		if filename == "" {
-			fmt.Println("Could not determine downloaded file path")
-			return nil, false
-		}
-
-		fmt.Println("Downloaded file:", filename)
-		fmt.Println("Download complete!")
-
-		// the id is known here, so there is no need to recover it from the
-		// filename the way local files have to
-		return []Track{{ID: id, Title: title, Filename: filename}}, true
-
-	case "2":
-		files, err := filepath.Glob("*.mp3")
-		if err != nil {
-			panic(err)
-		}
-
-		if len(files) == 0 {
-			fmt.Println("No mp3 files found in current directory.")
-			return nil, false
-		}
-
-		fmt.Println("\nLocal mp3 files:")
-		for i, f := range files {
-			fmt.Printf("%d: %s\n", i+1, f)
-		}
-
-		choice, ok := askChoice(scanner, "play", len(files))
-		if !ok {
-			return nil, false
-		}
-
-		filename := files[choice-1]
-		return []Track{{ID: parseID(filename), Title: titleFromFilename(filename), Filename: filename}}, true
-
-	case "3":
-		track, ok := historyMode(db)
-		if !ok {
-			return nil, false
-		}
-		return []Track{track}, true
-
-	case "4":
-		// Install/cache yt-dlp if it isn't installed yet.
-		ytdlp.MustInstall(context.TODO(), nil)
-
-		id, title, ok := pickVideo(scanner, "stream")
-		if !ok {
-			return nil, false
-		}
-		return []Track{{
-			ID:      id,
-			Title:   title,
-			PageURL: "https://www.youtube.com/watch?v=" + id,
-			Stream:  true,
-		}}, true
-
-	case "5":
-		fmt.Print("How many tracks? ")
-		if !scanner.Scan() {
-			return nil, false
-		}
-		n, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
-		if err != nil || n < 1 {
-			fmt.Println("Please enter a valid number")
-			return nil, false
-		}
-
-		// each slot is an ordinary mode pick, so a queue can mix downloads,
-		// local files, history entries and streams
-		queue := make([]Track, 0, n)
-		for i := 0; i < n; i++ {
-			fmt.Printf("\n--- track %d of %d ---\n", i+1, n)
-			more, ok := chooseSong(scanner, db)
-			if !ok {
-				// one bad pick should not throw away the tracks already
-				// queued, so play whatever was built
-				if len(queue) == 0 {
-					return nil, false
-				}
-				fmt.Printf("\nQueue stopped early: %d of %d tracks\n", len(queue), n)
-				break
-			}
-			queue = append(queue, more...)
-		}
-		return queue, true
-
-	case "q", "Q":
-		return nil, false
-
-	default:
-		fmt.Println("Unknown choice:", mode)
-		return nil, false
-	}
-}
-
-// askChoice reads a 1-based index from the user. ok is false when the user
-// cancels with 0 or types something unusable.
-func askChoice(scanner *bufio.Scanner, verb string, n int) (int, bool) {
-	fmt.Printf("\nEnter which song would you like to %s (0 to cancel): ", verb)
-
-	if !scanner.Scan() {
-		fmt.Println("No selection provided")
-		return 0, false
-	}
-
-	choice, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
-	if err != nil {
-		fmt.Println("Please enter a number.")
-		return 0, false
-	}
-	if choice == 0 {
-		return 0, false
-	}
-	if choice < 1 || choice > n {
-		fmt.Println("Invalid choice.")
-		return 0, false
-	}
-	return choice, true
-}
-
-// pickVideo searches YouTube and asks which of the top results to use.
-// ok is false when the user cancels.
-func pickVideo(scanner *bufio.Scanner, verb string) (id, title string, ok bool) {
-	fmt.Println("Enter name of song please:")
-
-	var input string
-	if scanner.Scan() {
-		input = strings.TrimSpace(scanner.Text())
-	}
-	fmt.Println("You entered:", input)
-
-	const limit = 3
-
-	videos, _, err := ytdlp.New().
-		FlatPlaylist().
-		ExtractInfo(context.TODO(), fmt.Sprintf("ytsearch%d:%s", limit, input))
-	if err != nil {
-		fmt.Println("Search failed:", err)
-		return "", "", false
-	}
-
-	if len(videos) > limit {
-		videos = videos[:limit]
-	}
-	if len(videos) == 0 {
-		fmt.Println("No videos found")
-		return "", "", false
-	}
-
-	fmt.Println("\nTop Results:")
-	for i, video := range videos {
-		if video == nil {
-			continue
-		}
-		title := ""
-		if video.Title != nil {
-			title = *video.Title
-		}
-		fmt.Printf("%d: ID: %s | Title: %s\n", i+1, video.ID, title)
-	}
-
-	choice, ok := askChoice(scanner, verb, len(videos))
-	if !ok {
-		return "", "", false
-	}
-
-	selected := videos[choice-1]
-	fmt.Println("You selected:", *selected.Title)
-	return selected.ID, *selected.Title, true
-}
-
-// titleFromFilename turns a downloaded mp3's filename into something worth
-// showing a human, stripping the video id and the "youtube - " prefix that
-// yt-dlp's output template adds.
-func titleFromFilename(filename string) string {
-	title := strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))
-	if id := parseID(filename); id != "" {
-		title = strings.TrimSpace(strings.TrimPrefix(title, id))
-	}
-	return strings.TrimSpace(strings.TrimPrefix(title, "youtube - "))
-}
-
-// songRow is one row of the songs table, carrying enough to play it again.
-type songRow struct {
-	Seq   int64
-	Track Track
-}
-
-const songColumns = `seq,id,name,url,title`
-
-func scanSong(rows interface{ Scan(...any) error }) (songRow, error) {
-	var (
-		row        songRow
-		id, name   sql.NullString
-		url, title sql.NullString
-	)
-	// every column is nullable in sqlite's eyes: rows written before url and
-	// title existed have NULL there, and id is nullable in the schema
-	err := rows.Scan(&row.Seq, &id, &name, &url, &title)
-	if err != nil {
-		return songRow{}, err
-	}
-	row.Track.ID = id.String
-	row.Track.Filename = name.String
-	row.Track.PageURL = url.String
-	row.Track.Stream = row.Track.PageURL != ""
-	row.Track.Title = title.String
-	if row.Track.Title == "" {
-		row.Track.Title = titleFromFilename(row.Track.Filename)
-	}
-	return row, nil
-}
-
-// prevSong returns the song with the largest seq less than `seq`.
-func prevSong(db *sql.DB, seq int64) (songRow, error) {
-	return scanSong(db.QueryRow(
-		`SELECT `+songColumns+` FROM songs WHERE seq< ? ORDER BY seq DESC LIMIT 1`, seq))
-}
-
-// nextSong returns the song with the smallest seq greater than `seq`.
-func nextSong(db *sql.DB, seq int64) (songRow, error) {
-	return scanSong(db.QueryRow(
-		`SELECT `+songColumns+` FROM songs WHERE seq > ? ORDER BY seq ASC LIMIT 1`, seq))
-}
-
-// historyMode is a full screen browser over the songs table. It opens on the
-// newest row and reads keys directly rather than through the shared scanner,
-// because it draws and redraws instead of asking a numbered question. ok is
-// false when the user cancels.
-func historyMode(db *sql.DB) (Track, bool) {
-	// start at newest song
-	current, err := scanSong(db.QueryRow(
-		`SELECT ` + songColumns + ` FROM songs ORDER BY seq DESC LIMIT 1`))
-	if err == sql.ErrNoRows {
-		fmt.Println("History is empty")
-		return Track{}, false
-	}
-	if err != nil {
-		log.Printf("load history : %v", err)
-		return Track{}, false
-	}
-	if err := keyboard.Open(); err != nil {
-		panic(err)
-	}
-	defer keyboard.Close()
-
-	for {
-		// draw
-		fmt.Print("\033[H\033[2J") // clear screen
-		fmt.Println("History")
-		fmt.Println()
-		fmt.Printf("  > %s\n", current.Track.label())
-		fmt.Println()
-		fmt.Println("a:back  d:forward  Enter:play  q:cancel")
-
-		r, code, err := keyboard.GetKey()
-		if err != nil {
-			return Track{}, false
-		}
-
-		// control keys (enter, esc, ...) come back with a zero rune,
-		// so they have to be matched on the key code
-		switch code {
-		case keyboard.KeyEnter, keyboard.KeyCtrlJ:
-			return current.Track, true
-		case keyboard.KeyEsc:
-			return Track{}, false
-		}
-
-		switch r {
-		case 'a':
-			prev, err := prevSong(db, current.Seq)
-			if err == sql.ErrNoRows {
-				// nothing older stay put
-				continue
-			}
-			if err != nil {
-				log.Printf("prev: %v", err)
-				continue
-			}
-			current = prev
-
-		case 'd':
-			next, err := nextSong(db, current.Seq)
-			if err == sql.ErrNoRows {
-				// nothing newer stay put
-				continue
-			}
-			if err != nil {
-				log.Printf("next: %v", err)
-				continue
-			}
-			current = next
-
-		case '\r', '\n':
-			return current.Track, true
-
-		case 'q', 'Q':
-			return Track{}, false
-		}
-
-	}
-}
-
-// oto allows only one context per process, and one context has one sample rate,
-// so the rate is ours to choose rather than the first track's.
+// The styles used to draw. Kept in one place so the colours can be changed
+// without hunting through the drawing code.
 var (
-	otoOnce sync.Once
-	otoCtx  *oto.Context
-	otoErr  error
-	// otoRate is the rate the context was created with. Every source has to
-	// produce audio at exactly this rate, because oto does no resampling of its
-	// own: feed it audio recorded at a different rate and it plays at the wrong
-	// speed, and there is no way to notice from here.
-	otoRate int
+	boxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("240")).
+			Padding(0, 1)
+
+	titleStyle  = lipgloss.NewStyle().Bold(true)
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	cursorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 )
 
-// defaultSampleRate is the rate the context is created with. It is fixed for
-// the whole process, so it is a constant rather than whatever the first track
-// happened to be.
+// contentWidth is how many columns fit inside the box. Until the terminal has
+// said how big it is, this is a made up number, because the first frame can
+// arrive before the size does.
+func (m model) contentWidth() int {
+	if m.width == 0 {
+		return 60
+	}
+	w := m.width - 6 // two for the border, two for the padding, two to spare
+	if w < 20 {
+		return 20
+	}
+	return w
+}
+
+func (m model) drawMenu() string {
+	var b strings.Builder
+
+	b.WriteString(titleStyle.Render("ektara") + "\n\n")
+
+	for i, text := range menuItems {
+		marker := "  "
+		if i == m.menuCursor {
+			marker = cursorStyle.Render("▸ ")
+		}
+		b.WriteString(fmt.Sprintf("%s%s\n", marker, text))
+	}
+
+	b.WriteString("\n" + dimStyle.Render("up/down move, enter choose, q quit") + "\n")
+	if m.lastError != "" {
+		b.WriteString("\n" + errorStyle.Render(m.lastError) + "\n")
+	}
+	if m.notice != "" {
+		b.WriteString("\n" + m.notice + "\n")
+	}
+
+	return boxStyle.Width(m.contentWidth()).Render(b.String())
+}
+
+func (m model) drawSearch() string {
+	prompt := "Search YouTube for: "
+	if m.askingCount {
+		prompt = "How many tracks? "
+	}
+
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(prompt) + "\n\n")
+	b.WriteString("  " + cursorStyle.Render(m.searchInput) + "▌\n\n")
+
+	// while the search is out, show that something is happening. The four
+	// frames are plain characters, so this looks the same in every font.
+	if m.searching {
+		b.WriteString("  " + spinFrame(m.spin) + " Searching...\n")
+	} else {
+		b.WriteString(dimStyle.Render("enter confirm, backspace erase, esc back") + "\n")
+	}
+
+	return boxStyle.Width(m.contentWidth()).Render(b.String())
+}
+
+// spinFrames is the busy animation. Spinning through four characters is the
+// whole trick.
+var spinFrames = []string{"|", "/", "-", "\\"}
+
+// spinFrame picks the frame for a given tick count. The remainder keeps it
+// inside the list, so the counter can grow forever.
+func spinFrame(n int) string {
+	return spinFrames[n%len(spinFrames)]
+}
+
+// itemsTitle is the heading for whichever list is showing.
+func (m model) itemsTitle() string {
+	switch m.mode {
+	case modeResults:
+		return "Results"
+	case modeFiles:
+		return "Files in this folder"
+	case modeHistory:
+		return "History"
+	}
+	return ""
+}
+
+func (m model) drawItems() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(m.itemsTitle()) + "\n\n")
+
+	// only the rows near the cursor are drawn. The history can be hundreds of
+	// songs long, and drawing all of them pushes the rest of the screen off the
+	// bottom, so the list scrolls instead.
+	start, count := listWindow(len(m.items), m.itemCursor, m.listRows())
+
+	for i := 0; i < count; i++ {
+		it := m.items[start+i]
+		marker := "  "
+		line := it.title
+		if start+i == m.itemCursor {
+			marker = cursorStyle.Render("▸ ")
+			line = cursorStyle.Render(it.title)
+		}
+		b.WriteString(fmt.Sprintf("%s%s\n", marker, clip(line, m.contentWidth()-4)))
+	}
+
+	// a count, so it is obvious that the list continues past the bottom. It is
+	// only shown when there is more than fits, because "1 of 1" is just noise.
+	if len(m.items) > count {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("\n  showing %d-%d of %d",
+			start+1, start+count, len(m.items))) + "\n")
+	}
+
+	b.WriteString("\n" + dimStyle.Render("up/down move, enter play, esc back") + "\n")
+	if m.notice != "" {
+		b.WriteString("\n" + m.notice + "\n")
+	}
+
+	return boxStyle.Width(m.contentWidth()).Render(b.String())
+}
+
+// listRows is how many list rows fit on the screen. The box takes four lines
+// (top border, heading, blank, blank) and three more at the bottom (blank,
+// hints, notice), so that is what is left of the height.
+func (m model) listRows() int {
+	if m.height == 0 {
+		return 10
+	}
+	n := m.height - 12
+	if n < 3 {
+		return 3
+	}
+	return n
+}
+
+// listWindow picks the range of rows to draw, keeping the cursor inside it.
 //
-// 48000 is the rate to fix it at. Most of what this plays is YouTube, which
-// serves 48kHz Opus, and 48kHz is what PipeWire, PulseAudio and Bluetooth all
-// default to, so the common case needs no conversion anywhere. A 44100 file, or
-// a device that wants 44100, is handled by the sound server below us.
-const defaultSampleRate = 48000
+// total is how many rows there are, cursor is which one is highlighted, and max
+// is how many fit on the screen. It returns the index of the first row drawn
+// and how many rows there are in that window, which is all the caller needs to
+// work out which row it is looking at.
+func listWindow(total, cursor, max int) (start, rows int) {
+	// everything fits, so draw it all
+	if total <= max {
+		return 0, total
+	}
 
-// bytesPerFrame is how many bytes of PCM make up one frame of audio: two
-// channels of signed 16-bit. A frame is the smallest thing a position can move
-// by, so every conversion between a byte offset and a playing time counts frames
-// rather than bytes.
-const bytesPerFrame = 2 * 2
-
-// getOtoContext returns the process wide audio context, creating it with
-// sampleRate the first time it is called. Every later caller gets the same one
-// whatever rate it asks for, because oto allows only a single context and the
-// device cannot be reconfigured underneath a playing track. That is why every
-// source is resampled to defaultSampleRate rather than the other way round.
-func getOtoContext(sampleRate int) (*oto.Context, error) {
-	otoOnce.Do(func() {
-		otoRate = sampleRate
-		op := &oto.NewContextOptions{SampleRate: sampleRate,
-			ChannelCount: 2,
-			Format:       oto.FormatSignedInt16LE,
-		}
-		ctx, readyChan, err := oto.NewContext(op)
-		if err != nil {
-			otoErr = err
-			return
-		}
-		// it might take a bit for hardware audio devices to be ready
-		<-readyChan
-		otoCtx = ctx
-		otoErr = ctx.Err()
-	})
-	return otoCtx, otoErr
+	// start half a screen above the cursor, so it sits near the middle and
+	// there is room to scroll in both directions
+	start = cursor - max/2
+	if start < 0 {
+		start = 0
+	}
+	if start > total-max {
+		start = total - max
+	}
+	return start, max
 }
 
-// inner is the width of the text inside the box, not counting its edges.
-const inner = 58
+func (m model) drawPlayer() string {
+	width := m.contentWidth()
+	var b strings.Builder
 
-// screen is everything the player display shows. It is collected first and
-// drawn as one piece, so the display never flickers half updated.
-type screen struct {
-	title   string
-	url     string
-	elapsed time.Duration
-	length  time.Duration
-	paused  bool
-	muted   bool
-	volume  int
-	shuffle bool
-	repeat  bool
-	notice  string
-	// until is when the notice stops being shown. A notice with no expiry
-	// would be wiped a tenth of a second after the key that made it, which
-	// is too fast to read.
-	until time.Time
-	queue []Track
-	index int
+	// the loading screen is a different box, not the player box with a gap in
+	// it, so a slow track says plainly that it is still starting
+	if m.loading {
+		b.WriteString(titleStyle.Render("Loading "+m.track.Title) + "\n")
+		if m.notice != "" {
+			b.WriteString("\n" + m.notice + "\n")
+		}
+		return boxStyle.Width(width).Render(b.String())
+	}
+
+	b.WriteString(titleStyle.Render("♪ "+m.track.Title) + "\n")
+	b.WriteString(dimStyle.Render(clip(m.subtitle(), width-2)) + "\n")
+
+	// a paused marker, so the display says why there is no sound
+	state := ""
+	if m.paused {
+		state = dimStyle.Render("[paused]")
+	}
+
+	// elapsed on the left, the total on the right, the pacman between them at
+	// the position playback has reached
+	b.WriteString(fmt.Sprintf("\n%s %s %s  %s\n",
+		clock(m.elapsed), seekBar(m.elapsed, m.length, m.barWidth()), clock(m.length), state))
+
+	b.WriteString("\n" + dimStyle.Render(m.keyHints()) + "\n")
+	if m.notice != "" {
+		b.WriteString(m.notice + "\n")
+	}
+
+	if len(m.queue) > 1 {
+		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("queue (%d)", len(m.queue))) + "\n")
+		start, rows := queueWindow(m.queue, m.index, 5)
+		for i, t := range rows {
+			marker := "  "
+			if start+i == m.index {
+				marker = cursorStyle.Render("▸ ")
+			}
+			b.WriteString(fmt.Sprintf("%s%s\n", marker, clip(t.Title, width-6)))
+		}
+	}
+
+	return boxStyle.Width(width).Render(b.String())
 }
+
+// subtitle is the second line of the player: the youtube link for a stream, and
+// the file it came from for a local mp3, which has no link.
+func (m model) subtitle() string {
+	if m.track.Stream {
+		return m.track.PageURL
+	}
+	return m.track.Filename
+}
+
+// keyHints is the two lines of keys at the bottom of the player. s and r show
+// their state, because a key that does nothing visible is a key nobody presses
+// twice.
+func (m model) keyHints() string {
+	return fmt.Sprintf("h/k seek  a prev  d next  p pause  s shuffle %s",
+		onOff(m.opts.shuffle)) + "\n" +
+		fmt.Sprintf("r repeat %s  m mute  q back  vol %d%%%s",
+			onOff(m.opts.repeat), int(m.volume*100+0.5), muted(m.muted))
+}
+
+// barWidth is how wide the progress bar can be. It shares a line with the
+// elapsed and total times, so it gets whatever is left over.
+func (m model) barWidth() int {
+	w := m.contentWidth() - 2 - 7 - 7 - 8
+	if w < 10 {
+		return 10
+	}
+	return w
+}
+
+// tracksToItems turns tracks into rows for a list screen.
+func tracksToItems(tracks []Track) []item {
+	items := make([]item, 0, len(tracks))
+	for _, t := range tracks {
+		items = append(items, item{title: t.Title, track: t})
+	}
+	return items
+}
+
+// ---------------------------------------------------------------------------
+// small display helpers
+// ---------------------------------------------------------------------------
 
 // clock formats a playing time as m:ss, or h:mm:ss once it is over an hour.
 func clock(d time.Duration) string {
@@ -784,70 +1266,6 @@ func clock(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", seconds/60, seconds%60)
 }
 
-// wide reports whether a rune is drawn two cells across, which every CJK and
-// emoji rune is. Counting these as one is what makes a box with a Japanese
-// title in it look broken.
-func wide(r rune) bool {
-	switch {
-	case r >= 0x1100 && r <= 0x115F, // hangul jamo
-		r >= 0x2E80 && r <= 0xA4CF,   // cjk radicals through yi
-		r >= 0xAC00 && r <= 0xD7A3,   // hangul syllables
-		r >= 0xF900 && r <= 0xFAFF,   // cjk compatibility
-		r >= 0xFE30 && r <= 0xFE6F,   // cjk compatibility forms
-		r >= 0xFF00 && r <= 0xFF60,   // fullwidth forms
-		r >= 0xFFE0 && r <= 0xFFE6,   // fullwidth signs
-		r >= 0x1F300 && r <= 0x1F64F, // emoji
-		r >= 0x1F900 && r <= 0x1F9FF, // supplemental emoji
-		r >= 0x20000 && r <= 0x3FFFD: // cjk extension planes
-		return true
-	}
-	return false
-}
-
-// cells is how many columns s takes up on screen, which is not the same as
-// how many runes it has.
-func cells(s string) int {
-	n := 0
-	for _, r := range s {
-		if wide(r) {
-			n += 2
-		} else {
-			n++
-		}
-	}
-	return n
-}
-
-// clip shortens s until it fits in n columns, ending in an ellipsis when it
-// had to cut, so a long title cannot break the shape of the box.
-func clip(s string, n int) string {
-	if cells(s) <= n {
-		return s
-	}
-	// one column is kept for the ellipsis itself
-	var b strings.Builder
-	used := 0
-	for _, r := range s {
-		w := 1
-		if wide(r) {
-			w = 2
-		}
-		if used+w > n-1 {
-			break
-		}
-		b.WriteRune(r)
-		used += w
-	}
-	return b.String() + "…"
-}
-
-// say puts a message on the display for a couple of seconds, which is long
-// enough to read and short enough not to sit there for the rest of the track.
-func (s *screen) say(msg string) {
-	s.notice = msg
-	s.until = time.Now().Add(2 * time.Second)
-}
-
 // onOff says whether a switch is on, in as few characters as possible because
 // the key hints have to fit on one line.
 func onOff(b bool) string {
@@ -858,19 +1276,12 @@ func onOff(b bool) string {
 }
 
 // muted marks the volume as silent, because the volume number stays where it
-// was while mute is on, so the number alone would say otherwise.
+// was while mute is on, so the number on its own would say otherwise.
 func muted(b bool) string {
 	if b {
 		return " (muted)"
 	}
 	return ""
-}
-
-// line puts text between the left and right edges of the box, padded so every
-// line is the same width and the box stays a rectangle.
-func line(s string) string {
-	s = clip(s, inner)
-	return "│ " + s + strings.Repeat(" ", inner-cells(s)) + " │"
 }
 
 // seekBar is the progress bar, with a pacman at the playback position. The
@@ -933,671 +1344,66 @@ func queueWindow(queue []Track, index, max int) (start int, rows []Track) {
 	return start, queue[start : start+max]
 }
 
-// draw builds the whole display: the box, the key hints, and the queue.
-func (s screen) draw() string {
-	var b strings.Builder
-
-	// the box: title at the top, the url under it, and the seek bar at the
-	// bottom
-	// the border is inner columns of text plus one column of space either side,
-	// which is what line adds. Counting the dashes as inner+4 instead makes
-	// the top and bottom two columns wider than everything between them.
-	b.WriteString("╭" + strings.Repeat("─", inner+2) + "╮\n")
-	b.WriteString(line("♪ "+s.title) + "\n")
-	b.WriteString(line(s.url) + "\n")
-
-	// a paused marker, so the display says why there is no sound. It goes on
-	// the end of the seek line rather than on a row of its own, which keeps
-	// the box three lines tall for a one track queue.
-	state := ""
-	if s.paused {
-		state = "[paused]"
+// clip shortens s until it is n columns wide, ending in an ellipsis when it had
+// to cut, so a long title cannot push the box out of shape.
+//
+// It counts columns rather than letters, because lipgloss does too: a CJK or
+// emoji rune takes two columns, and counting it as one is what makes a box with
+// a Japanese title in it look broken.
+func clip(s string, n int) string {
+	if lipgloss.Width(s) <= n {
+		return s
 	}
-
-	// the seek row: elapsed on the left, the total on the right, and the
-	// pacman between them at the position playback has reached
-	bar := seekBar(s.elapsed, s.length, 30)
-	b.WriteString(line(fmt.Sprintf("%7s %s %7s  %s",
-		clock(s.elapsed), bar, clock(s.length), state)) + "\n")
-	b.WriteString("╰" + strings.Repeat("─", inner+2) + "╯\n")
-
-	// the keys, with s and r showing their state, because a key that does
-	// nothing visible is a key nobody presses twice. The lines are kept to the
-	// width of the box, so the keys read as part of the display rather than as
-	// something spilled out of it.
-	b.WriteString(line(fmt.Sprintf("h/k seek  a prev  d next  p pause  s shuffle %v",
-		onOff(s.shuffle))) + "\n")
-	b.WriteString(line(fmt.Sprintf("r repeat %v  m mute  q back to menu  vol %d%%%s",
-		onOff(s.repeat), s.volume, muted(s.muted))) + "\n")
-
-	// a short lived message, for things like a key having been pressed
-	if s.notice != "" {
-		b.WriteString(" " + s.notice + "\n")
+	// one column is kept for the ellipsis itself
+	runes := []rune(s)
+	for len(runes) > 0 && lipgloss.Width(string(runes)+"…") > n {
+		runes = runes[:len(runes)-1]
 	}
+	return string(runes) + "…"
+}
 
-	// the queue, when there is one, capped at five rows so it cannot push the
-	// display off the screen
-	if len(s.queue) > 1 {
-		b.WriteString(fmt.Sprintf(" queue (%d):\n", len(s.queue)))
-		start, rows := queueWindow(s.queue, s.index, 5)
-		for i, t := range rows {
-			marker := "  "
-			if start+i == s.index {
-				marker = "▸ "
-			}
-			b.WriteString(fmt.Sprintf("  %s%d. %s\n", marker, start+i+1, clip(t.Title, inner-6)))
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+func main() {
+	// The interface owns the terminal, so nothing may write a log line to it. A
+	// log goes to stderr, which is the same screen, and the line lands in the
+	// middle of the drawing and stays there until the next full redraw. The log
+	// therefore goes to a file in the state directory. If that file cannot be
+	// opened the log is thrown away instead: a missing log is a nuisance, but a
+	// garbled screen is a bug.
+	if path, err := logPath(); err == nil {
+		if lf, err := tea.LogToFile(path, ""); err == nil {
+			defer lf.Close()
+		} else {
+			log.SetOutput(io.Discard)
 		}
-	}
-
-	return b.String()
-}
-
-// redraw paints the display over the top of the last one, and puts the cursor
-// back at the top left so the next paint starts from the same place.
-func redraw(s screen) {
-	// home, then erase down. erasing everything is simpler but makes the
-	// whole terminal flash
-	fmt.Print("\033[H\033[J" + s.draw())
-}
-
-// clearScreen wipes the display, so whatever the main loop prints next starts
-// on a clean screen rather than on top of the box.
-func clearScreen() {
-	fmt.Print("\033[H\033[2J")
-}
-
-// play plays one track and returns two things.
-//
-// The first is which way to go next:
-//
-//	"next" - the track played out, or the user pressed d
-//	"prev" - the user pressed a
-//	"menu" - the user pressed q
-//
-// The second is true when the track played all the way through. It is false
-// when the track was skipped or could not be played, so skipped and broken
-// tracks stay out of the history.
-// The queue is passed in as well as the track, only so the display can show
-// what is coming next. It is not read or changed here.
-func play(db *sql.DB, opts *options, t Track, index int, start time.Time, queue []Track) (string, bool) {
-	var (
-		src audioSource
-		err error
-	)
-	if t.Stream {
-		fmt.Printf("Streaming %s\n", t.Title)
-		src, err = openStream(context.Background(), t)
 	} else {
-		src, err = openLocal(context.Background(), t)
+		log.SetOutput(io.Discard)
 	}
+
+	db, err := openDB()
 	if err != nil {
-		log.Printf("play %s: %v", t.label(), err)
-		fmt.Printf("Could not play %s: %v\n", t.label(), err)
-		return "next", false
+		fmt.Println("Could not open songs.db:", err)
+		os.Exit(1)
 	}
-	// releases the file handle, or kills ffmpeg, which is what stops a stream
-	// being downloaded in the background after the user has moved on
-	defer src.Stop()
+	defer db.Close()
 
-	// prepare an Oto context ( this will use your default audio device)
-	// Remember that you should **not** create more than one context,
-	// so the context is created once and reused for every song.
-	otoCtx, err := getOtoContext(src.Rate())
-	if err != nil {
-		log.Printf("play %s: oto initialization failed: %v", t.label(), err)
-		fmt.Printf("Could not play %s: audio device error: %v\n", t.label(), err)
-		return "next", false
+	// Discord is optional. Without it the player still works, it just does not
+	// show what is playing, so a login failure is worth a line in the log and
+	// nothing more. The client leaves itself unlogged when the socket cannot be
+	// opened, and quietly ignores every activity update after that.
+	if err := client.Login(discordAppID); err != nil {
+		log.Printf("Discord rich presence unavailable: %v", err)
 	}
-
-	// create a new player that will handle our sound. the source is seekable,
-	// which is what lets h and k rewind, because oto's Seek only works on a
-	// source that implements io.Seeker.
-	player := otoCtx.NewPlayer(src)
-	defer player.Close()
-
-	player.Play()
-
-	if err := keyboard.Open(); err != nil {
-		panic(err)
-	}
-	defer keyboard.Close()
-
-	// channel that receives key presses. buffered so the goroutine can
-	// hand the key over and go back to waiting, which lets keyboard.Close()
-	// cancel it instead of leaving it stuck on the send forever.
-	keys := make(chan string, 1)
-
-	// Start a goroutine that listens for keys.
-	go func() {
-		for {
-			key, _, err := keyboard.GetKey()
-			if err != nil {
-				return
-			}
-			keys <- string(key)
-		}
-	}()
-
-	paused := false
-	muted := false
-	var current_volume float64 = 0
-
-	// the display is painted from scratch on every tick and on every key, so
-	// anything shown here is whatever is true right now
-	view := screen{
-		title:   t.Title,
-		url:     t.PageURL,
-		queue:   queue,
-		index:   index,
-		shuffle: opts.shuffle,
-		repeat:  opts.repeat,
-	}
-	if !t.Stream {
-		// a local file has no page url, so the file it came from is the
-		// useful second line instead
-		view.url = t.Filename
-	}
-	defer clearScreen()
-	clearScreen()
-
-	for {
-		select {
-		case key := <-keys:
-			switch key {
-			case "p":
-				if paused {
-					player.Play()
-					paused = false
-					// pass the original start so elapsed time keeps
-					// counting from when the track first began
-					if err := setDiscordActivity(db, t, start); err != nil {
-						log.Printf("update Discord activity: %v", err)
-					}
-				} else {
-					player.Pause()
-					paused = true
-					if err := setDiscordIdleActivity(); err != nil {
-						log.Printf("update Discord activity: %v", err)
-					}
-				}
-			case "h":
-				seekBy(db, player, src, t, &start, -5*time.Second)
-			case "k":
-				seekBy(db, player, src, t, &start, 5*time.Second)
-
-			case "s":
-				view.say(opts.toggle("shuffle", &opts.shuffle))
-			case "r":
-				view.say(opts.toggle("repeat", &opts.repeat))
-
-			case "a":
-				// no wrap: the first track has nowhere to go back to
-				if index > 0 {
-					return "prev", false
-				}
-			case "d":
-				return "next", false
-
-			case "q":
-				player.PauseAndStopReading()
-				return "menu", true
-
-			case "m":
-				if !muted {
-					// the level is remembered rather than remembered as
-					// zero, so unmuting gives back the volume that was set
-					current_volume = player.Volume()
-					player.SetVolume(0.0)
-					muted = true
-					view.say("muted")
-				} else {
-					player.SetVolume(current_volume)
-					muted = false
-					view.say("unmuted")
-				}
-			case "+":
-				if current_volume+0.01 > 1 {
-					current_volume = 1.0
-				} else {
-					current_volume += 0.01
-				}
-				player.SetVolume(current_volume)
-				view.say(fmt.Sprintf("volume %.0f%%", current_volume*100.0))
-			case "-":
-				if current_volume-0.01 < 0 {
-					current_volume = 0
-				} else {
-					current_volume -= 0.01
-				}
-				player.SetVolume(current_volume)
-				view.say(fmt.Sprintf("volume %.0f%%", current_volume*100.0))
-			}
-
-		default:
-			// song ended on its own -> on to the next one
-			if !player.IsPlaying() && !paused {
-				// a source that broke stops the player with an error on it,
-				// which is not the same as reaching the end of the track. Only
-				// a clean finish earns a history row, or every track that
-				// failed to stream would end up in it.
-				if err := player.Err(); err != nil {
-					log.Printf("play %s: %v", t.label(), err)
-					// the message goes on the display rather than being
-					// printed, or the redraw would wipe it immediately
-					view.say(fmt.Sprintf("Playback failed: %v", err))
-					redraw(view)
-					// a moment to read it before the next track wipes it
-					time.Sleep(3 * time.Second)
-					return "next", false
-				}
-				return "next", true
-			}
-
-			// the notice goes away once its time is up
-			if time.Now().After(view.until) {
-				view.notice = ""
-			}
-
-			// Give the source a chance to say something, and show it in this
-			// same frame rather than the next one. The read does not wait: a
-			// source with no message ready gives the default arm at once, and a
-			// local file never implements the interface at all.
-			if w, ok := src.(warner); ok {
-				select {
-				case msg := <-w.Warnings():
-					view.say(msg)
-				default:
-				}
-			}
-
-			view.paused = paused
-			view.muted = muted
-			view.volume = int(current_volume*100.0 + 0.5)
-			view.elapsed = playedDuration(src, player)
-			view.length = src.Length()
-			view.shuffle = opts.shuffle
-			view.repeat = opts.repeat
-			redraw(view)
-
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-}
-
-// seekBy moves playback by delta, and moves the Discord start time with it, so
-// the elapsed time on the presence keeps matching what is actually being heard.
-//
-// It works by asking oto to seek the source. A local mp3 rewinds by seeking the
-// file, which is instant. A stream has to kill ffmpeg and start a new one at
-// the right place, and pick up a fresh media url, which takes a second or two.
-func seekBy(db *sql.DB, player *oto.Player, src audioSource, t Track, start *time.Time, delta time.Duration) {
-
-	// where we are now, in pcm bytes
-	from, err := src.Seek(0, io.SeekCurrent)
-	if err != nil {
-		log.Printf("seek: %v", err)
-		return
-	}
-
-	// delta is a whole number of seconds, so this is a whole number of frames
-	to := from + int64(delta/time.Second)*int64(src.Rate())*bytesPerFrame
-
-	newPos, err := player.Seek(to, io.SeekStart)
-	if err != nil {
-		log.Printf("seek: %v", err)
-		return
-	}
-
-	// a seek forward means more audio has been heard, which means the presence
-	// has to start earlier to show the same elapsed time
-	*start = start.Add(-pcmDuration(newPos-from, src.Rate()))
-
-	if err := setDiscordActivity(db, t, *start); err != nil {
+	if err := setDiscordIdleActivity(); err != nil {
 		log.Printf("update Discord activity: %v", err)
 	}
-}
 
-// playedDuration reports how much of the song has actually been heard.
-//
-// It counts bytes the player has pulled rather than reading the wall clock, so
-// it never includes the delay before audio starts, and it does not advance
-// while paused: oto stops reading the source when the player is paused.
-func playedDuration(src audioSource, player *oto.Player) time.Duration {
-	// ask the source where it is, rather than counting bytes, so that a seek
-	// moves the displayed position too
-	pos, err := src.Seek(0, io.SeekCurrent)
-	if err != nil || pos <= 0 {
-		return 0
+	p := tea.NewProgram(initialModel(db))
+	if _, err := p.Run(); err != nil {
+		fmt.Println("Alas, there's been an error:", err)
+		os.Exit(1)
 	}
-
-	// the player reads ahead of the audio hardware, so discount whatever is
-	// still sitting in its buffer to get the sample that is audible right now
-	if buffered := int64(player.BufferedSize()); buffered < pos {
-		pos -= buffered
-	} else {
-		pos = 0
-	}
-
-	return pcmDuration(pos, src.Rate())
-}
-
-// pcmDuration turns a count of PCM bytes into a playing time.
-func pcmDuration(bytes int64, rate int) time.Duration {
-	return time.Duration(bytes/bytesPerFrame) * time.Second / time.Duration(rate)
-}
-
-// audioSource is the audio the player reads: signed 16-bit stereo PCM that can
-// be rewound and knows how to be shut down. It has to be seekable, because
-// that is the only way oto's Seek works.
-//
-// The rate it produces is not its own to choose. It has to be the rate the
-// device was opened at, because oto hands the samples straight to the sound
-// server as they are and will not fix a rate that does not match.
-type audioSource interface {
-	io.ReadSeeker
-	// Rate is the sample rate of the PCM this produces
-	Rate() int
-	// Length is how long the whole track is, or 0 when it is not known
-	Length() time.Duration
-	// Stop releases the file handle, or kills ffmpeg
-	Stop()
-}
-
-// warner is implemented by a source that has something to say to the player that
-// does not fit through Read and Seek — currently only "you seeked past the end
-// of the download, so this is about to stop".
-//
-// It is a separate interface rather than another method on audioSource because
-// only one kind of source has anything to say. The player asks whether the
-// source it was handed is one of those, and a source that is not is silent: a
-// local file has nothing to report, and giving it a channel that never carries
-// anything would be the same as saying nothing with more code.
-//
-// Seek runs on oto's goroutine and the display belongs to the goroutine running
-// play, so neither can touch the other's. The channel is how a value crosses
-// between them, and the player reads it without waiting, so a source that is
-// slow to say something is a source that is not holding up playback.
-type warner interface {
-	Warnings() <-chan string
-}
-
-// openLocal prepares a local file for playback.
-//
-// ffmpeg does the decoding here too, for the same reason it does it for a
-// stream: the audio device is locked to one sample rate for the whole process,
-// so whatever comes out of here has to be at that rate whatever the file was
-// recorded at. ffmpeg is told which rate to produce and resamples on the way
-// there. A file decoded in process could not do that, and would play slow or
-// fast whenever its rate was not the one the device was locked to.
-//
-// ponytail: this means a local file needs ffmpeg, which it did not before. That
-// is the price of not being wrong about the rate, and ffmpeg is already needed
-// for every stream.
-
-func openLocal(ctx context.Context, t Track) (audioSource, error) {
-	// Ask for the length before anything is spawned, so a file that is missing
-	// or is not audio at all is reported as itself rather than turning into a
-	// track that silently finishes at once. It is worked out once here because
-	// every seek starts ffmpeg again, and ffprobe costs a process of its own.
-	length, err := localDuration(t.Filename)
-	if err != nil {
-		return nil, err
-	}
-
-	return newFFmpegSource(ctx, func(context.Context) (string, time.Duration, error) {
-		return t.Filename, length, nil
-	})
-}
-
-// localDuration asks ffprobe how long a file is.
-//
-// It is a separate program rather than a guess from the file size, because an
-// mp3 header carries a bitrate and dividing the size by that is only right for
-// a constant bitrate file. ffprobe reads the headers properly, and it ships in
-// the same package as ffmpeg.
-//
-// A file ffprobe can make no sense of is an error, but a file whose length it
-// cannot pin down is not: that is only worth losing the progress bar's total
-// over, so the track plays and the bar counts up without one.
-func localDuration(filename string) (time.Duration, error) {
-	args := []string{
-		"-v", "error",
-		// ask for the container's own idea of how long it is
-		"-show_entries", "format=duration",
-		// print the bare number, so there is nothing to pick out of the output
-		"-of", "default=noprint_wrappers=1:nokey=1",
-		filename,
-	}
-
-	out, err := exec.Command("ffprobe", args...).Output()
-	if err != nil {
-		return 0, fmt.Errorf("ffprobe %q: %w", filename, err)
-	}
-
-	seconds, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	if err != nil {
-		return 0, nil
-	}
-
-	return time.Duration(seconds * float64(time.Second)), nil
-}
-
-// resolveFunc hands ffmpeg something to read and says how long the result is.
-// A stream resolves to a fresh media url every time it is called, because the
-// url carries a token that expires and a seek needs one that still works.
-type resolveFunc func(ctx context.Context) (input string, duration time.Duration, err error)
-
-// ffmpegSource is a stream of signed 16-bit stereo PCM that can be rewound.
-// Everything that plays goes through one of these, a local file as much as a
-// YouTube stream, because everything has to come out at the same rate.
-//
-// ffmpeg pours audio out of a pipe like water through a hose: once a byte has
-// been read it is gone, so a pipe cannot be rewound. Seek therefore kills the
-// running ffmpeg and starts a new one with -ss, which is what makes this look
-// seekable from oto's point of view.
-type ffmpegSource struct {
-	ctx     context.Context
-	resolve resolveFunc
-
-	// rate is what ffmpeg was told to produce, which is the rate the audio
-	// device is locked to for the whole process
-	rate int
-	// length is how long the track is, 0 when nothing could say
-	length time.Duration
-
-	cmd    *exec.Cmd
-	r      io.ReadCloser
-	stderr *bytes.Buffer
-
-	// pos is where we are in the track, in pcm bytes. A pipe cannot be asked,
-	// so it is counted here. It is atomic because the player reads on oto's
-	// goroutine while the position display reads it from the main one.
-	pos atomic.Int64
-}
-
-// newFFmpegSource builds a source that plays whatever resolve hands over,
-// resampled to the rate the audio device is locked to.
-func newFFmpegSource(ctx context.Context, resolve resolveFunc) (*ffmpegSource, error) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return nil, fmt.Errorf("ffmpeg is required to play anything: %w", err)
-	}
-
-	// the rate has to be settled before ffmpeg can be told what to produce, and
-	// it is settled here rather than by the track because it cannot change once
-	// the device is open
-	if _, err := getOtoContext(defaultSampleRate); err != nil {
-		return nil, fmt.Errorf("audio device: %w", err)
-	}
-
-	// whatever rate the context ended up at is the rate ffmpeg has to produce,
-	// which is the same number whether or not something got here first
-	f := &ffmpegSource{ctx: ctx, resolve: resolve, rate: otoRate}
-	if err := f.start(0); err != nil {
-		return nil, err
-	}
-	return f, nil
-}
-
-// start kills whatever ffmpeg is running and begins a new one at seekTo.
-func (f *ffmpegSource) start(seekTo time.Duration) error {
-	f.Stop()
-
-	input, duration, err := f.resolve(f.ctx)
-	if err != nil {
-		return err
-	}
-	f.length = duration
-
-	args := []string{"-hide_banner", "-loglevel", "error"}
-	if seekTo > 0 {
-		args = append(args, "-ss", strconv.FormatFloat(seekTo.Seconds(), 'f', 3, 64))
-	}
-	args = append(args,
-		"-i", input,
-		"-vn", // drop any video stream
-		"-f", "s16le", "-ar", strconv.Itoa(f.rate), "-ac", "2", "-",
-	)
-
-	f.stderr = &bytes.Buffer{}
-	f.cmd = exec.CommandContext(f.ctx, "ffmpeg", args...)
-	pipe, err := f.cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	f.cmd.Stderr = f.stderr
-
-	if err := f.cmd.Start(); err != nil {
-		return fmt.Errorf("start ffmpeg: %w", err)
-	}
-	f.r = pipe
-	return nil
-}
-
-func (f *ffmpegSource) Read(p []byte) (int, error) {
-	// a failed start leaves no pipe, and a nil f.r would be a crash rather than
-	// a track that could not play
-	if f.r == nil {
-		return 0, io.EOF
-	}
-
-	n, err := f.r.Read(p)
-
-	// count what was read, because a pipe cannot be asked where it is. This is
-	// what makes the position display move, so it cannot be left out.
-	f.pos.Add(int64(n))
-
-	return n, err
-}
-
-// Seek implements io.Seeker, which is the only thing oto's Seek needs: it
-// type-asserts its source to an io.Seeker and forwards to it.
-//
-// oto has already stopped reading and thrown away the buffered audio by the
-// time this runs, so f.r can be swapped out without a lock.
-func (f *ffmpegSource) Seek(offset int64, whence int) (int64, error) {
-	switch whence {
-	case io.SeekStart:
-	case io.SeekCurrent:
-		// a pipe cannot report where it is, so the position is kept alongside
-		// the source instead
-		offset += f.pos.Load()
-	default:
-		// seeking from the end would need the length in bytes, and the length
-		// is not known until the next resolve, so it is not offered
-		return 0, fmt.Errorf("cannot seek with whence %d", whence)
-	}
-	if offset < 0 {
-		offset = 0
-	}
-
-	// being asked where we are happens every time the position is drawn, and
-	// must not throw away the ffmpeg that is playing
-	if offset == f.pos.Load() {
-		return offset, nil
-	}
-
-	// a seek past the end makes ffmpeg produce nothing at all, the pipe closes
-	// and the player reports the track finished, which is the behaviour we want
-	if err := f.start(pcmDuration(offset, f.rate)); err != nil {
-		return 0, err
-	}
-	f.pos.Store(offset)
-	return offset, nil
-}
-
-// restartAtCurrent throws away the running ffmpeg and starts a new one at the
-// position already reached, without moving that position.
-//
-// Seek cannot do this. It is asked where we are every time the position is
-// drawn, and it leaves the ffmpeg alone when the answer is where it already is.
-// This is the other thing: pick the audio up again from the same place, which a
-// source reading a file that is still growing needs whenever it reaches the end
-// of what has arrived.
-func (f *ffmpegSource) restartAtCurrent() error {
-	return f.start(pcmDuration(f.pos.Load(), f.rate))
-}
-
-func (f *ffmpegSource) Rate() int {
-	return f.rate
-}
-
-func (f *ffmpegSource) Length() time.Duration {
-	return f.length
-}
-
-// Stop kills the running ffmpeg and waits for it, so nothing is left behind
-// and a stream is not still downloading after the user has moved on.
-func (f *ffmpegSource) Stop() {
-	if f.cmd == nil {
-		return
-	}
-	_ = f.cmd.Process.Kill()
-	_ = f.cmd.Wait()
-	f.cmd = nil
-	f.r = nil
-	// ffmpeg is silent unless something went wrong, so anything here is worth
-	// showing
-	if msg := strings.TrimSpace(f.stderr.String()); msg != "" {
-		log.Printf("ffmpeg: %s", msg)
-	}
-}
-
-// parseID pulls the YouTube video id out of a downloaded filename, which
-// yt-dlp writes as "<id> <extractor> - <title>.<ext>". It returns "" when the
-// first field is not shaped like an id, which is how a hand named mp3 is
-// recognised as having nothing to recover.
-func parseID(filename string) string {
-	fields := strings.Fields(filepath.Base(strings.TrimSpace(filename)))
-	if len(fields) == 0 {
-		return ""
-	}
-
-	id := fields[0]
-	if len(id) != 11 {
-		return ""
-	}
-
-	for _, char := range id {
-		if (char < 'a' || char > 'z') &&
-			(char < 'A' || char > 'Z') &&
-			(char < '0' || char > '9') &&
-			char != '_' && char != '-' {
-			return ""
-		}
-	}
-
-	return id
-}
-
-// lastNonEmptyLine returns the final line of s with its whitespace trimmed,
-// or "" when s holds no such line. yt-dlp reports the file it wrote as the
-// last non empty line of its output.
-func lastNonEmptyLine(s string) string {
-	var last string
-	for _, line := range strings.Split(s, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			last = line
-		}
-	}
-	return last
 }
