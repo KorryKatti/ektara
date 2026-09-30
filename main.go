@@ -7,7 +7,7 @@ package main
 // copy of the model plus a command to run later, and View turns the model into
 // text. Nothing else is allowed to draw or read keys.
 //
-// Anything slow (starting ffmpeg, searching YouTube, talking to Discord) is a
+// Anything slow (resolving a stream, searching YouTube, talking to Discord) is a
 // command, which means a function that runs in the background and hands back a
 // message. That is why there are no sleeps and no blocking calls below.
 
@@ -22,7 +22,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/ebitengine/oto/v3"
 	"github.com/hugolgst/rich-go/client"
 )
 
@@ -80,12 +79,12 @@ const (
 // to say "look at the audio again and redraw".
 type tickMsg time.Time
 
-// trackOpenedMsg says a track finished starting up. It carries the source and
-// the player that were made, or the reason there was none.
+// trackOpenedMsg says a track finished starting up. It carries no source and no
+// player any more, because there is one player for the whole session and mpv
+// holds the audio; the message is only here to say that opening finished, one
+// way or the other.
 type trackOpenedMsg struct {
-	src    audioSource
-	player *oto.Player
-	err    error
+	err error
 }
 
 // searchedMsg says a YouTube search finished.
@@ -99,10 +98,6 @@ type downloadedMsg struct {
 	track Track
 	err   error
 }
-
-// warnMsg is something the audio source wanted to say, like "you seeked past
-// the part that has downloaded so far".
-type warnMsg string
 
 // ---------------------------------------------------------------------------
 // the model
@@ -153,13 +148,15 @@ type model struct {
 	queue       []Track
 
 	// --- the player ---
-	index   int
-	track   Track
-	src     audioSource
-	player  *oto.Player
+	index int
+	track Track
+	// player is the one mpv instance the whole session shares. It is a pointer
+	// rather than a field of its own because there is only ever one: the audio
+	// device is slow to open and mpv keeps it open across loadfiles.
+	player  audio
 	loading bool
 
-	// paused, muted and volume are the truth about the player. The oto player
+	// paused, muted and volume are the truth about the player. The mpv instance
 	// is told what they say. They are never set from what the player says back,
 	// because the tick runs ten times a second and would undo every key press.
 	paused bool
@@ -211,12 +208,14 @@ type item struct {
 
 // initialModel builds the starting model. It takes the database because
 // everything the program remembers hangs off the model, including the handle it
-// reads the history with.
-func initialModel(db *sql.DB) model {
+// reads the history with, and the player because it is the one the whole session
+// shares.
+func initialModel(db *sql.DB, a audio) model {
 	return model{
-		db:   db,
-		mode: modeMenu,
-		opts: options{},
+		db:     db,
+		mode:   modeMenu,
+		opts:   options{},
+		player: a,
 		// 1.0 is full volume. Starting at 0 would mean a silent player until
 		// the user pressed + twenty times.
 		volume: 1.0,
@@ -251,10 +250,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case downloadedMsg:
 		return m.onDownloaded(msg)
-
-	case warnMsg:
-		m.say(string(msg))
-		return m, nil
 
 	case tea.KeyPressMsg:
 		return m.onKey(msg)
@@ -540,7 +535,7 @@ func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			// Discord gets the original start time again, so the time it
 			// counts matches what has actually been heard
-			return m, discordPlayingCmd(m.db, m.track, m.startTime)
+			return m, discordPlayingCmd(m.track, m.startTime)
 		}
 		m.paused = true
 		if m.player != nil {
@@ -609,9 +604,9 @@ func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// soundVolume is what to actually hand oto: zero while muted, otherwise the
-// volume. The volume number stays where it was while muted, which is what makes
-// unmuting give back the level that was set rather than silence.
+// soundVolume is what to actually hand the player: zero while muted, otherwise
+// the volume. The volume number stays where it was while muted, which is what
+// makes unmuting give back the level that was set rather than silence.
 func (m model) soundVolume() float64 {
 	if m.muted {
 		return 0
@@ -672,35 +667,20 @@ func (m *model) startTrack() tea.Cmd {
 	// ready, because opening a stream takes a second and a presence that lags
 	// behind the music looks broken.
 	//
-	// No tick here. onTick returns one on every path out of itself, so the
-	// chain started by Init is already running and keeps itself running.
-	// Returning another one from here starts a second chain that also keeps
-	// itself running, and the two never meet. Every play and every trip back to
-	// the menu would leave one more behind, so the display would redraw faster
-	// and faster for the rest of the session.
-	return tea.Batch(openTrackCmd(m.track), discordPlayingCmd(m.db, m.track, m.startTime))
+	// No tick here. onTick batches one of its own onto whatever this returns,
+	// so the chain that Init started keeps being renewed, and starting a second
+	// one here would make the display repaint twice as fast for the rest of the
+	// session. The callers that are not onTick, which is the a and d keys and
+	// picking a track, rely on the existing chain still running.
+	return tea.Batch(openTrackCmd(m.player, m.track), discordPlayingCmd(m.track, m.startTime))
 }
 
-// stopTrack shuts the audio down.
-//
-// The order matters. The player is stopped before the source, because the
-// source is the thing the player is reading from. The other way round leaves
-// ffmpeg writing into a pipe nobody is reading.
-//
-// Every path that leaves a track goes through here. There are no defers in this
-// code, because the function that used to have them returns immediately now
-// and nothing would ever run them.
+// stopTrack ends the audio but keeps the player, and the open audio device,
+// ready for the next track. It is not a close: the one mpv instance outlives
+// every track in the queue and is only torn down when the program ends.
 func (m *model) stopTrack() {
 	if m.player != nil {
-		m.player.PauseAndStopReading()
-		m.player.Close()
-		m.player = nil
-	}
-	if m.src != nil {
-		// this kills ffmpeg, which is what stops a stream downloading in the
-		// background after the user has moved on
-		m.src.Stop()
-		m.src = nil
+		m.player.Stop()
 	}
 }
 
@@ -741,7 +721,7 @@ func (m model) backToMenu() (tea.Model, tea.Cmd) {
 	// Discord goes to idle once, here, rather than between every pair of
 	// tracks, or the presence flickers in the gap.
 	//
-	// No tick here either, for the same reason startTrack does not return one.
+	// No tick either, for the same reason startTrack does not return one.
 	return m, discordIdleCmd()
 }
 
@@ -757,13 +737,14 @@ func (m model) quit() (tea.Model, tea.Cmd) {
 }
 
 func (m model) seek(delta time.Duration) (tea.Model, tea.Cmd) {
-	if m.player == nil || m.src == nil {
+	if m.player == nil {
 		return m, nil
 	}
+	m.player.SeekBy(delta)
 	// the Discord start time moves with the seek, so the elapsed time on the
 	// presence keeps matching what is actually being heard
-	m.startTime = seekBy(m.player, m.src, m.startTime, delta)
-	return m, discordPlayingCmd(m.db, m.track, m.startTime)
+	m.startTime = m.startTime.Add(-delta)
+	return m, discordPlayingCmd(m.track, m.startTime)
 }
 
 // ---------------------------------------------------------------------------
@@ -786,40 +767,50 @@ func (m model) onTick() (tea.Model, tea.Cmd) {
 	m.spin++
 
 	// nothing to watch unless a track is actually open
-	if m.mode != modePlaying || m.loading || m.player == nil || m.src == nil {
+	if m.mode != modePlaying || m.loading || m.player == nil {
 		return m, tick()
 	}
 
 	// the track finished, or it broke
-	if !m.player.IsPlaying() && !m.paused {
+	if !m.player.Playing() && !m.paused {
+		// Both branches below hand back what move() returned, so the tick has
+		// to be added here rather than trusted to be in there already. move()
+		// returns a command to open the next track, or one to shut the presence
+		// down, and neither of those is a tick. Returning it unadorned was the
+		// bug this comment used to explain away: the clock chain that Init
+		// started is still the only one, and onTick is what renews it, so the
+		// first time a song ended the whole display froze. The progress bar
+		// stopped, the search spinner stopped, and the queue never advanced.
+		//
+		// The tick has to be batched in rather than started separately, so that
+		// there is still exactly one chain of them. Two chains both renewing
+		// themselves is how the display ends up repainting twice as fast for the
+		// rest of the session.
 		if err := m.player.Err(); err != nil {
-			// A source that broke stops the player with an error on it, which
+			// A track that broke stops the player with an error on it, which
 			// is not the same as reaching the end of the track. Only a clean
 			// finish earns a history row, or every track that failed to stream
 			// would end up in it.
 			log.Printf("play %s: %v", m.track.label(), err)
 			m.lastError = "Playback failed: " + err.Error()
 
-			// Move on rather than sit here. Leaving the failed player in the
+			// Move on rather than sit here. Leaving the stopped player in the
 			// model means the next tick arrives, finds the same stopped player
 			// carrying the same error, and does all of this again: ten times a
-			// second, for as long as the app is left open. That is what filled
-			// the log with eighty five megabytes of one repeated error.
-			//
-			// move() leads to startTrack(), which calls stopTrack() and clears
-			// the player, so there is nothing left here to fail a second time.
-			return m.move(1)
+			// second, for as long as the app is left open.
+			next, cmd := m.move(1)
+			return next, tea.Batch(cmd, tick())
 		}
 		// it played all the way through, so it goes in the history.
-		// move() starts the next tick going itself, by returning tick().
 		logSong(m.db, m.track)
-		return m.move(1)
+		next, cmd := m.move(1)
+		return next, tea.Batch(cmd, tick())
 	}
 
-	// copy the position in. Nothing else knows where playback is, so this is
-	// the only place the display can get it from.
-	m.elapsed = playedDuration(m.src, m.player)
-	m.length = m.src.Length()
+	// copy the position in. mpv is the one playing, so it knows exactly where
+	// it is, including any read-ahead, and there is nothing to subtract.
+	m.elapsed = m.player.Position()
+	m.length = m.player.Length()
 
 	// a notice with no expiry would be wiped a tenth of a second after the key
 	// that made it, which is too fast to read
@@ -854,17 +845,16 @@ func (m model) onTrackOpened(msg trackOpenedMsg) (tea.Model, tea.Cmd) {
 	// it opened, so whatever went wrong last is no longer what is happening
 	m.lastError = ""
 
-	m.src = msg.src
-	m.player = msg.player
-	m.length = msg.src.Length()
+	// the volume is the model's own number rather than whatever mpv happens to
+	// be at, so a new track does not reset the level
+	if m.player != nil {
+		m.player.SetVolume(m.soundVolume())
+		// it loaded paused, so the sound starts now that the model has caught
+		// up, rather than a second early while the network was still answering
+		m.player.Play()
+	}
 
-	// the volume is whatever the player is already at, not whatever this model
-	// happened to be holding, so a new track does not reset the level
-	m.volume = msg.player.Volume()
-	m.player.SetVolume(m.soundVolume())
-
-	// a source that has something to say gets a goroutine waiting to say it
-	return m, listenCmd(msg.src)
+	return m, nil
 }
 
 func (m model) onSearched(msg searchedMsg) (tea.Model, tea.Cmd) {
@@ -927,14 +917,13 @@ func tick() tea.Cmd {
 	})
 }
 
-// openTrackCmd starts a track's audio in the background and sends back what it
-// made. Opening a local file spawns ffmpeg, and opening a stream resolves a
-// fresh YouTube url first, so this takes long enough that doing it inline would
-// freeze the screen.
-func openTrackCmd(t Track) tea.Cmd {
+// openTrackCmd starts a track's audio in the background and sends back whether
+// it worked. Opening a local file is quick, but opening a stream asks yt-dlp to
+// resolve a media url first, which takes a second or two, so this happens off
+// the display's goroutine.
+func openTrackCmd(a audio, t Track) tea.Cmd {
 	return func() tea.Msg {
-		src, player, err := openTrack(t)
-		return trackOpenedMsg{src: src, player: player, err: err}
+		return trackOpenedMsg{err: openTrack(a, t)}
 	}
 }
 
@@ -954,27 +943,11 @@ func downloadCmd(id, title string) tea.Cmd {
 	}
 }
 
-// listenCmd waits for the audio source to say something and passes it on as a
-// message. It sits there until the source speaks or the track is stopped, which
-// is fine: one goroutine per track, thrown away with the track.
-//
-// A local file is not a warner, so it never has anything to say and this
-// returns nothing rather than a goroutine waiting forever.
-func listenCmd(src audioSource) tea.Cmd {
-	w, ok := src.(warner)
-	if !ok {
-		return nil
-	}
+// discordPlayingCmd tells Discord what is playing. It talks to a socket, so it
+// is a command too.
+func discordPlayingCmd(t Track, start time.Time) tea.Cmd {
 	return func() tea.Msg {
-		return warnMsg(<-w.Warnings())
-	}
-}
-
-// discordPlayingCmd tells Discord what is playing. It talks to a socket and
-// looks a cover image up in the database, so it is a command too.
-func discordPlayingCmd(db *sql.DB, t Track, start time.Time) tea.Cmd {
-	return func() tea.Msg {
-		if err := setDiscordActivity(db, t, start); err != nil {
+		if err := setDiscordActivity(t, start); err != nil {
 			log.Printf("update Discord activity: %v", err)
 		}
 		return nil
@@ -1390,6 +1363,18 @@ func main() {
 	}
 	defer db.Close()
 
+	// The player is created once, before the interface starts, because it opens
+	// the audio device and there is no point paying for that if the program is
+	// about to be closed again, and none at all if the user never plays
+	// anything. A failure here is worth printing rather than logging, because
+	// nothing has been drawn yet and it is the only way the user finds out.
+	audio, err := newPlayer()
+	if err != nil {
+		fmt.Println("Could not open the audio player:", err)
+		os.Exit(1)
+	}
+	defer audio.Close()
+
 	// Discord is optional. Without it the player still works, it just does not
 	// show what is playing, so a login failure is worth a line in the log and
 	// nothing more. The client leaves itself unlogged when the socket cannot be
@@ -1401,7 +1386,7 @@ func main() {
 		log.Printf("update Discord activity: %v", err)
 	}
 
-	p := tea.NewProgram(initialModel(db))
+	p := tea.NewProgram(initialModel(db, audio))
 	if _, err := p.Run(); err != nil {
 		fmt.Println("Alas, there's been an error:", err)
 		os.Exit(1)

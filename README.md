@@ -1,30 +1,41 @@
 # ektara
 
-A terminal music player. It plays local mp3s and YouTube streams, and shows what
-you're listening to as a Discord rich presence.
+A terminal music player. It plays local mp3s and YouTube streams, and shows
+what you're listening to as a Discord rich presence.
 
 ## What it does
 
-- plays `.mp3` files out of a folder on your disk
+- plays `.mp3` files out of your library folder
 - searches YouTube and downloads what it finds
-- streams from YouTube through a temporary file, which is deleted when the track
-  ends
+- streams straight from YouTube, with nothing written to disk
 - queues several tracks together, from any mix of those sources
 - keeps a history of what you played, in a local SQLite database
 - shows the current track in your Discord status
 
 ## Requirements
 
-- Go 1.27 or newer
-- `ffmpeg`, **which you have to install yourself** — needed for all playback.
-  Local files as much as streams, because the audio device is locked to a single
-  sample rate for the whole session and ffmpeg is what converts to it. YouTube
-  serves Opus and AAC, never mp3, so a stream could not be decoded without it
-  anyway.
+- Go 1.27 or newer, and a C compiler. The build uses cgo, which `go-sqlite3`
+  already needed before mpv did, so this is not new.
+- **libmpv**, because the audio is played through mpv rather than decoded here.
+  It is needed at runtime either way:
+  - Debian, Ubuntu: `libmpv2` (runtime) and `libmpv-dev` (build)
+  - Arch: `mpv` — one package, which is what provides `libmpv.so`
+  - Fedora: `mpv-libs` (runtime) and `mpv-devel` (build)
 
-`ffprobe` ships inside ffmpeg, so it comes with the same install. It is used to
-find out how long a track is, and, for a stream, how much of it has arrived so
-far.
+  If you would rather not have the development headers installed, build with
+  `-tags nocgo` instead. That makes the mpv binding load `libmpv.so` at runtime
+  with purego, and the headers are then only needed to build, not to run:
+
+  ```sh
+  go build -tags nocgo ./...
+  ```
+
+  Without that tag the headers are needed at build time, and without cgo at all
+  the program will build but then fail on the database, because SQLite needs
+  cgo regardless.
+
+- `ffmpeg`, only for mode 1. yt-dlp needs it to turn a video into an mp3.
+  Streaming, local files and everything else go through mpv and do not.
 
 `yt-dlp` is downloaded and installed automatically the first time it is needed,
 so there is nothing to do about that one.
@@ -32,17 +43,24 @@ so there is nothing to do about that one.
 ## Build and run
 
 ```sh
+./build.sh
+```
+
+or, if you would rather not have the size trimming:
+
+```sh
 go build ./...
 ```
 
-Then run it from a folder that contains the music you want:
+Then run it:
 
 ```sh
 ./ektara
 ```
 
- **it plays the mp3s in the current directory**, and it keeps its database there too. Running it 
- somewhere else means a different library and an empty history.
+Your library, your history and the log all live under `~/.local/share/ektara`
+and `~/.local/state/ektara`, so the folder you run it from does not matter.
+Point `XDG_DATA_HOME` somewhere else if you want the library on another disk.
 
 ## The five modes
 
@@ -51,9 +69,9 @@ The menu asks which of these you want:
 | mode | what it does |
 | --- | --- |
 | 1 | search YouTube, download the result, play the downloaded file |
-| 2 | play an mp3 from the current directory |
+| 2 | play an mp3 from your library |
 | 3 | browse your history and play something from it |
-| 4 | stream from YouTube, through a temporary file |
+| 4 | stream from YouTube, without writing anything to disk |
 | 5 | build a queue out of several tracks, which can mix all of the above |
 
 Modes 1 to 4 hand back a single track. Only mode 5 gives you more than one, so
@@ -88,54 +106,68 @@ While browsing history, the keys are different:
 
 ## What gets written to disk
 
-In the directory you ran it from:
+In your data directory, `~/.local/share/ektara`:
 
-- `songs.db` — your history, plus cover art URLs so repeat plays of the same
-  track don't look them up again
-- any mp3s you chose to download
+- `songs.db` — your history, and a cache of searches so a repeated lookup does
+  not ask YouTube again
+- `music/` — the library: any mp3s you chose to download, plus your own
 
-And one place outside it, for streams:
+In your state directory, `~/.local/state/ektara`:
 
-- `/tmp/ektara-streams` — the track currently streaming, deleted when it ends.
-  Anything left there is from a run that did not exit cleanly, and is cleared on
-  the next start.
+- `ektara.log`
+
+A stream writes nothing. It used to go through a temporary file that was deleted
+when the track ended, and there is none of that left to clean up.
 
 ## Known limits
 
-**A stream is silent for the first few seconds.** YouTube streams are fetched
-into a temporary file, and `yt-dlp` spends three to five seconds working out what
-to fetch before it writes a single byte. Nothing is wrong when a track starts
-quietly.
+**A stream takes a few seconds to start.** Nothing is wrong when a track begins
+quietly. `yt-dlp` has to work out a direct link to the audio before there is
+anything to play, which takes three to five seconds. Everything after that is
+mpv's own buffering and is not noticeable.
 
-**Seeking forward past what has downloaded yet waits for the download.** The
-audio arrives in the background, and skipping to a place the download has not
-reached means waiting there rather than playing silence. A whole YouTube track
-usually lands within a few seconds, so this is normally under a second of
-nothing. On a long track over a slow connection it is longer than that, and the
-position display is the only sign it is happening.
+**A local file's length is only known once mpv has opened it.** The progress bar
+has nothing to draw against for the first moment of a track, then settles.
 
-If the download finishes and the place you asked for still is not there, the
-player says `seek is past the end of the download` and the track ends, rather
-than leaving the position sitting somewhere that will never play.
+**YouTube is not always going to answer.** If it decides you have asked for too
+much, a search falls back on an older cached answer rather than reporting the
+refusal, and a stream that will not resolve is reported as a failed track and
+skipped. A request limiter spaces out searches and stream resolutions for this
+reason, though it is deliberately loose: ten at once, then one every five
+seconds.
 
 ## Notes
 
-A YouTube stream is downloaded to a temporary file by `yt-dlp` while ffmpeg plays
-out of it, rather than read straight off the network. That costs a few seconds of
-silence at the start, and buys two things: seeking is a read of a file on disk
-instead of a fresh request to YouTube, and it cannot be interrupted by a link
-that expired since the track started.
+**Playback is mpv's job, not this program's.** It opens the sound device,
+decodes, resamples to whatever the device wants, and seeks without being
+restarted. Nothing is decoded in process, which is why the local-file mode
+plays a 44.1kHz recording at the right speed on a 48kHz device without anything
+here converting it.
 
-The audio device is opened once, at one sample rate, and cannot be reopened
-mid-track. Everything is resampled to that rate by ffmpeg as it plays, so a file
-recorded at 44.1kHz sounds right on a 48kHz device. Nothing is decoded in
-process.
+**Streams are a url, not a file.** `yt-dlp` resolves a direct media link and mpv
+plays that. The link is good for hours and a track is minutes. This replaced a
+temporary file that was downloaded while ffmpeg read it, and the code to keep
+those two in step was the largest part of the program.
 
-The player display repaints a whole frame every 100ms and on every key press,
+**There is one player for the whole session.** The audio device is slow to open,
+so a track change loads a new file onto the same mpv instance rather than making
+a new one, and there is no gap of silence between tracks.
+
+**The player display repaints a whole frame every 100ms and on every key press,
 built as one string and written in one go, because a frame assembled from
-separate writes shows half of each frame while it is being drawn.
+separate writes shows half of each frame while it is being drawn.**
 
-A rewrite of the interface onto [Bubble Tea](https://charm.land/bubbletea/v2)
-and [Lip Gloss](https://charm.land/lipgloss/v2) is in progress. The dependencies
-are in `go.mod`, but the player display is still drawn by hand, so that part is
-not finished.
+## Tests
+
+```sh
+go test ./...                        # everything that needs nothing special
+EKTARA_AUDIO_TESTS=1 go test ./...   # also plays real audio through the device
+```
+
+The audio tests are skipped unless you ask for them, because a machine with no
+sound server would fail them for reasons that have nothing to do with the code.
+One further test goes to YouTube and needs `EKTARA_NETWORK_TESTS=1` as well.
+
+Those tests are worth running before a change to the player. They are the only
+thing that can say the audio path works at all, and they have caught a deadlock
+in seeking and a use-after-free at shutdown that nothing else could see.
