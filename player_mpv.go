@@ -430,6 +430,12 @@ func streamURL(pageURL string) (string, error) {
 
 	found, _, err := ytdlp.New().
 		Retries("3").
+		// web_embedded rather than the default web client. YouTube answers the
+		// default client with "Sign in to confirm you're not a bot" when it has
+		// decided the address is a bot, and the embedded client is not always
+		// given the same answer. It is a workaround for that decision, not a
+		// fix to it: when a real sign-in is needed this fails too.
+		ExtractorArgs("youtube:player_client=web_embedded").
 		// bestaudio picks the best audio-only stream. Asking for it by name
 		// rather than picking one here is what puts the resolved url in the
 		// top-level url field, which is the one thing being asked for.
@@ -446,6 +452,14 @@ func streamURL(pageURL string) (string, error) {
 	if info.URL == nil || *info.URL == "" {
 		return "", fmt.Errorf("yt-dlp gave no playable url for %s", pageURL)
 	}
+
+	// A freshly resolved url answers 403 for the first second or two of its
+	// life and 206 after that, which is YouTube letting the address settle
+	// rather than anything wrong with it. yt-dlp waits five seconds for the
+	// same reason when it downloads. Handing the url straight to mpv means a
+	// refusal, and a refusal is silent from mpv's side: the position simply
+	// never moves, which looks exactly like a broken sound card.
+	time.Sleep(3 * time.Second)
 
 	return *info.URL, nil
 }

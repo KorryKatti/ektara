@@ -8,9 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/hugolgst/rich-go/client"
 	"github.com/lrstanley/go-ytdlp"
 	_ "github.com/mattn/go-sqlite3"
 	"log"
@@ -146,43 +144,6 @@ func adoptLegacyDB(dst string) {
 	log.Printf("copied the old database from %s to %s", legacy, dst)
 }
 
-// setDiscordActivity shows t as the thing being played, with its cover and a
-// link back to YouTube. start is when playback began, not when the presence was
-// written, so the elapsed time Discord shows survives a pause and resume.
-func setDiscordActivity(t Track, start time.Time) error {
-	song := t.Title
-	largeImage := "playing"
-
-	var buttons []*client.Button
-	if t.ID != "" {
-		// already inside the id check, so thumbnailURL cannot answer empty here
-		largeImage = thumbnailURL(t.ID)
-		pageURL := t.PageURL
-		if pageURL == "" {
-			pageURL = "https://www.youtube.com/watch?v=" + t.ID
-		}
-		buttons = []*client.Button{
-			{
-				Label: "Watch on YouTube",
-				Url:   pageURL,
-			},
-		}
-	}
-
-	return client.SetActivity(client.Activity{
-		State:      "Listening to music",
-		Details:    song,
-		LargeImage: largeImage,
-		LargeText:  song,
-		SmallImage: "ektara",
-		SmallText:  "Ektara",
-		Timestamps: &client.Timestamps{
-			Start: &start,
-		},
-		Buttons: buttons,
-	})
-}
-
 // thumbnailURL is the cover image for a YouTube video, or "" when there is no
 // id to build one from.
 //
@@ -201,20 +162,6 @@ func thumbnailURL(id string) string {
 		return ""
 	}
 	return "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg"
-}
-
-// setDiscordIdleActivity clears the playing song and shows nothing instead. It
-// is written whenever audio stops, so a stale presence cannot outlive the
-// track it names.
-func setDiscordIdleActivity() error {
-	return client.SetActivity(client.Activity{
-		State:      "Idle",
-		Details:    "No song playing",
-		LargeImage: "ektara",
-		LargeText:  "Ektara",
-		SmallImage: "playing",
-		SmallText:  "Idle",
-	})
 }
 
 // logSong records a track in the history. It is called after the track has
@@ -324,6 +271,9 @@ func downloadVideo(id, title string) (Track, error) {
 
 	res, err := ytdlp.New().
 		Retries("3").
+		// the same embedded client as streamURL, and for the same reason: the
+		// default web client gets the bot check
+		ExtractorArgs("youtube:player_client=web_embedded").
 		SetWorkDir(dir).
 		ExtractAudio().
 		AudioFormat("mp3").
