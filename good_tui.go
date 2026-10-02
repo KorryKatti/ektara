@@ -1,14 +1,58 @@
 package main
 
 import (
+	"bytes"
+	_ "embed"
 	"fmt"
+	"image"
 	"math/rand"
 	"os"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"ektara/asciiart"
 )
+
+//go:embed assets/cover.png
+var coverPNG []byte
+
+// cover renders the album art at a given width and keeps the result, because a
+// frame is redrawn on every key press and each render is thousands of styled
+// characters.
+var cover = struct {
+	sync.Mutex
+	byWidth map[int]string
+}{byWidth: map[int]string{}}
+
+func coverArt(width int) string {
+	if width < 8 {
+		return ""
+	}
+
+	cover.Lock()
+	defer cover.Unlock()
+
+	if art, ok := cover.byWidth[width]; ok {
+		return art
+	}
+
+	art := "[cover unavailable]"
+	if img, _, err := image.Decode(bytes.NewReader(coverPNG)); err == nil {
+		rendered, err := asciiart.Render(img, asciiart.Options{
+			Width: width,
+			Color: true,
+			Mode:  asciiart.HalfBlock,
+		})
+		if err == nil {
+			art = rendered
+		}
+	}
+	cover.byWidth[width] = art
+	return art
+}
 
 type model struct {
 	width  int
@@ -42,6 +86,9 @@ var (
 			BorderTop(true).
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(lipgloss.Color("#333333"))
+
+	timeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#C4B5FD"))
 )
 
 func initialModel() model {
@@ -177,11 +224,20 @@ func (m model) View() string {
 		contentWidth = 1
 	}
 
+	// The art sits in the content panel, so it has to fit whatever is left of
+	// it after the sidebar and the panel's own padding.
+	coverWidth := contentWidth - 6
+	if coverWidth > 34 {
+		coverWidth = 34
+	}
+	art := coverArt(coverWidth)
+
 	content := contentStyle.
 		Width(contentWidth).
 		Height(bodyHeight).
 		Render(
-			timeMsg() + "\n\n" +
+			timeStyle.Render(timeMsg()) + "\n\n" +
+				art + "\n\n" +
 				"Recently played\n\n" +
 				"  [ Album ]    [ Album ]    [ Album ]\n\n" +
 				"  Track 1\n" +

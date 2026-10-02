@@ -11,6 +11,8 @@ what you're listening to as a Discord rich presence.
 - queues several tracks together, from any mix of those sources
 - keeps a history of what you played, in a local SQLite database
 - shows the current track in your Discord status
+- `asciiart/` renders an image as ASCII text, for cover art or anything else.
+  Ported from [go-ascii](https://github.com/nearlynithin/go-ascii), see Credits.
 
 ## Requirements
 
@@ -171,3 +173,40 @@ One further test goes to YouTube and needs `EKTARA_NETWORK_TESTS=1` as well.
 Those tests are worth running before a change to the player. They are the only
 thing that can say the audio path works at all, and they have caught a deadlock
 in seeking and a use-after-free at shutdown that nothing else could see.
+
+## Credits
+
+**`asciiart/` is a port of [go-ascii](https://github.com/nearlynithin/go-ascii)
+by [nearlynithin](https://github.com/nearlynithin).** The sampling, the
+luminosity and the character ramp are theirs. The original is a `main` package
+that writes to stdout and reads the terminal size itself; this is the same
+conversion as a library that returns a string and takes the width as an
+argument, so it can be drawn inside a TUI.
+
+There are two ways to draw an image with it. `Mode: Mono` is the original: one
+ramp character per pixel, which survives being pasted anywhere. `Mode: HalfBlock`
+packs two vertically adjacent pixels into every cell instead, putting the top one
+in the foreground colour and the bottom one in the background behind a `▀`. That
+doubles the vertical resolution at the same width and is what makes the colour
+worth having.
+
+```go
+// plain text, the original's conversion
+asciiart.Render(img, asciiart.Options{Width: 80})
+
+// colour, two pixels per cell
+asciiart.Render(img, asciiart.Options{Width: 80, Color: true, Mode: asciiart.HalfBlock})
+```
+
+Half blocks only render where the terminal draws them, and need a terminal that
+does truecolour. Adjacent cells that share a colour are styled once rather than
+once each, which is the difference between a frame of tens of kilobytes and a few.
+
+If you want the original tool rather than the library:
+
+```sh
+git clone https://github.com/nearlynithin/go-ascii
+cd go-ascii && go build -o go-ascii
+./go-ascii [-color] <image.png>
+```
+
