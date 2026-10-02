@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -67,6 +69,76 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func timeMsg() string {
+	hour := time.Now().Hour()
+
+	var pool []string
+
+	switch {
+	case hour < 5:
+		pool = []string{
+			"I am the master of my fate, I am the captain of my soul.",
+			"Hello darkness, my old friend.",
+			"Do not go gentle into that good night.",
+			"See you space cowboy...",
+			"In the silence, I find myself.",
+			"The night whispers secrets.",
+		}
+
+	case hour < 10:
+		pool = []string{
+			"Here comes the sun, and I say, it's all right.",
+			"Wake up to reality.",
+			"I love the smell of napalm in the morning.",
+			"It's a new dawn, it's a new day.",
+			"Every morning brings new opportunities.",
+			"Rise and shine—the world awaits.",
+		}
+
+	case hour < 14:
+		pool = []string{
+			"It's high noon.",
+			"Fortune favors the bold.",
+			"There's a starman waiting in the sky.",
+			"May the Force be with you.",
+			"Peak performance unlocked.",
+			"The world is your playground.",
+		}
+
+	case hour < 18:
+		pool = []string{
+			"The show must go on.",
+			"We're gonna need a bigger boat.",
+			"Fear is the mind-killer.",
+			"Carry on my wayward son.",
+			"Every ending is a new beginning.",
+			"The best is yet to come.",
+		}
+
+	case hour < 22:
+		pool = []string{
+			"Why so serious?",
+			"I am inevitable.",
+			"Paint it black.",
+			"The night is dark and full of terrors.",
+			"Embrace the shadows within.",
+			"What doesn't kill you makes you stronger.",
+		}
+
+	default:
+		pool = []string{
+			"I can do this all day.",
+			"Turn off your mind, relax and float downstream.",
+			"End? No, the journey doesn't end here.",
+			"To infinity and beyond.",
+			"In dreams, we are infinite.",
+			"The night whispers secrets only you can hear.",
+		}
+	}
+
+	return pool[rand.Intn(len(pool))]
+}
+
 func (m model) View() string {
 	if m.width == 0 {
 		return ""
@@ -84,7 +156,7 @@ func (m model) View() string {
 
 	title := titleStyle.
 		Width(m.width).
-		Render("  My Spotify TUI")
+		Render("  Ektara ⭐")
 
 	sidebar := sidebarStyle.
 		Height(bodyHeight).
@@ -109,7 +181,7 @@ func (m model) View() string {
 		Width(contentWidth).
 		Height(bodyHeight).
 		Render(
-			"Good evening\n\n" +
+			timeMsg() + "\n\n" +
 				"Recently played\n\n" +
 				"  [ Album ]    [ Album ]    [ Album ]\n\n" +
 				"  Track 1\n" +
