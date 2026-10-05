@@ -113,11 +113,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "s":
-			if m.searchActive {
-				m.searchActive = false
-			} else {
-				m.searchActive = true
-			}
+			m.searchActive = !m.searchActive
 		}
 	}
 
