@@ -60,6 +60,60 @@ func TestRenderShape(t *testing.T) {
 	}
 }
 
+// A terminal cell is about twice as tall as it is wide, so a square picture has
+// to come out half as many rows as columns. Any other ratio draws a square cover
+// as a tall thin one, which is what it did when the row count was derived from a
+// truncated step instead of the source's own shape.
+func TestRenderSquareSourceIsSquare(t *testing.T) {
+	const size = 300
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			img.Set(x, y, color.White)
+		}
+	}
+
+	for _, width := range []int{8, 20, 34, 80} {
+		got, err := Render(img, Options{Width: width, Mode: HalfBlock})
+		if err != nil {
+			t.Fatalf("width %d: Render: %v", width, err)
+		}
+		lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+		if want := width / 2; len(lines) != want {
+			t.Errorf("width %d: want %d rows for a square picture, got %d",
+				width, want, len(lines))
+		}
+	}
+}
+
+// Every column has to read some of the source. A step rounded down leaves the
+// right-hand edge unsampled, which squeezes the picture and loses detail there.
+func TestRenderSamplesWholeWidth(t *testing.T) {
+	const size = 300
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			// the last twenty pixels are the only white ones
+			if x >= size-20 {
+				img.Set(x, y, color.White)
+			} else {
+				img.Set(x, y, color.Black)
+			}
+		}
+	}
+
+	got, err := Render(img, Options{Width: 34})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	line := strings.SplitN(got, "\n", 2)[0]
+	last := string([]rune(line)[33])
+	if last == " " {
+		t.Errorf("the right-hand edge was dropped, so the art is squeezed: %q", line)
+	}
+}
+
 // A width of zero means DefaultWidth, and the image is never scaled up past its
 // own pixel count.
 func TestRenderWidthClamping(t *testing.T) {

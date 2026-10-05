@@ -180,7 +180,14 @@ func Render(img image.Image, opts Options) (string, error) {
 
 	// How many source pixels go into one output column. The grid below works in
 	// squares of this size, which is the whole of the resizing.
-	stepX := bounds.Dx() / cols
+	//
+	// It rounds up rather than down so that cols of them span the entire width.
+	// Truncating instead drops the remainder off the right-hand edge, because
+	// cols*stepX then stops short of the last pixel: a 300px cover at 34 columns
+	// gives stepX 8 and covers 272px, so a tenth of the picture is never read.
+	// That squeezes the art horizontally, which is most of why it looked tall
+	// and narrow.
+	stepX := (bounds.Dx() + cols - 1) / cols
 	if stepX < 1 {
 		stepX = 1
 	}
@@ -188,15 +195,22 @@ func Render(img image.Image, opts Options) (string, error) {
 	// Both modes lay out on one grid. A HalfBlock cell splits its own height in
 	// two, so it covers twice the source height of a Mono cell and both land on
 	// the same number of rows: the grid carries two sub-rows per output row and
-	// each mode reads the half it needs.
+	// each mode reads the half it needs. Stepping x and y by the same amount is
+	// what makes a HalfBlock cell square, since its two pixels are each half a
+	// cell tall and a cell is twice as tall as it is wide.
 	//
-	// Stepping x and y by the same amount is what makes a HalfBlock cell square,
-	// since its two pixels are each half a cell tall and a cell is twice as tall
-	// as it is wide. Mono needs the old doubling instead, because there a whole
-	// cell is one pixel and is therefore twice as tall as it is wide. That is
-	// the original's stepY = stepX * 2, and it is why its pictures came out
-	// stretched.
-	rows := (bounds.Dy() + stepX*2 - 1) / (stepX * 2)
+	// The row count is worked out from the requested columns and the source's
+	// own shape rather than from stepX, so the answer survives being rounded. A
+	// terminal cell is about twice as tall as it is wide, so cols columns and
+	// rows rows are drawn cols wide by rows*2 tall; setting rows to half the
+	// columns times the source height over width makes that the source's aspect
+	// ratio exactly. A square picture comes out a square, which is what the
+	// height of the picture is for.
+	rows := (cols*bounds.Dy() + bounds.Dx()) / (2 * bounds.Dx())
+	if rows < 1 {
+		rows = 1
+	}
+
 	grid := sample(img, bounds, stepX, cols, rows)
 
 	styles := newStyleCache(opts.Color)

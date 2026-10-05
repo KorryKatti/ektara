@@ -16,6 +16,13 @@ import (
 	"ektara/asciiart"
 )
 
+// for colouring what is pressed
+type model struct {
+	width        int
+	height       int
+	searchActive bool
+}
+
 //go:embed assets/cover.png
 var coverPNG []byte
 
@@ -52,11 +59,6 @@ func coverArt(width int) string {
 	}
 	cover.byWidth[width] = art
 	return art
-}
-
-type model struct {
-	width  int
-	height int
 }
 
 var (
@@ -110,6 +112,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "s":
+			if m.searchActive {
+				m.searchActive = false
+			} else {
+				m.searchActive = true
+			}
 		}
 	}
 
@@ -194,11 +202,20 @@ func (m model) View() string {
 	// Fixed-height areas.
 	titleHeight := 1
 	playerHeight := 4
+	searchText := "Search"
 
 	// Everything between title and player.
 	bodyHeight := m.height - titleHeight - playerHeight
 	if bodyHeight < 1 {
 		bodyHeight = 1
+	}
+
+	if m.searchActive {
+		searchText = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#1DB954")).
+			Bold(true).
+			Render("Search")
+
 	}
 
 	title := titleStyle.
@@ -210,7 +227,7 @@ func (m model) View() string {
 		Render(
 			"HOME\n\n" +
 				"  Home\n" +
-				"  Search\n" +
+				"  " + searchText + "\n" +
 				"  Library\n\n" +
 				"PLAYLISTS\n\n" +
 				"  Liked Songs\n" +
