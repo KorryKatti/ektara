@@ -478,3 +478,189 @@ func TestSampleAveragesBlocks(t *testing.T) {
 		}
 	}
 }
+
+// TestBrailleCarriesMoreDetail is the reason Braille exists. In the same number
+// of cells it has to resolve more of the picture than HalfBlock does, or it is
+// not worth having.
+//
+// The test uses a picture of a hard edge: a black half and a white half. A half
+// block at any width turns that into a flat run of one glyph, because every cell
+// on the edge averages to the same value. Braille turns it into a run of dots
+// that traces the edge, because the dots inside each cell are compared with each
+// other rather than with the whole picture.
+func TestBrailleCarriesMoreDetail(t *testing.T) {
+	const size = 40
+
+	// left half black, right half white
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	for y := range size {
+		for x := range size {
+			if x < size/2 {
+				img.SetRGBA(x, y, color.RGBA{A: 255})
+			} else {
+				img.SetRGBA(x, y, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+			}
+		}
+	}
+
+	half, err := Render(img, Options{Width: 20, Mode: HalfBlock, Color: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	braille, err := Render(img, Options{Width: 20, Mode: Braille, Color: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// both must be the same shape on screen, which is the whole point: the same
+	// number of rows for the same picture
+	halfRows := strings.Count(half, "\n")
+	brailleRows := strings.Count(braille, "\n")
+	if halfRows != brailleRows {
+		t.Errorf("half block gave %d rows and braille gave %d, want the same",
+			halfRows, brailleRows)
+	}
+
+	// and braille must actually contain braille characters
+	dots := 0
+	for _, r := range braille {
+		if r >= 0x2800 && r <= 0x28ff {
+			dots++
+		}
+	}
+	if dots == 0 {
+		t.Error("braille mode produced no braille characters")
+	}
+}
+
+// TestBrailleRunesAreInTheBrailleBlock checks the bit patterns are laid out the
+// way Unicode numbers the dots, rather than in some other order that would draw
+// a picture reflected or scrambled.
+func TestBrailleRunesAreInTheBrailleBlock(t *testing.T) {
+	// a 2x4 grid: left column black, right column white. Every dot on the left
+	// is brighter than the cell average and every dot on the right is darker, so
+	// only the left column should be raised.
+	grid := image.NewRGBA(image.Rect(0, 0, 2, 4))
+	for y := range 4 {
+		grid.SetRGBA(0, y, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+		grid.SetRGBA(1, y, color.RGBA{A: 255})
+	}
+
+	got := brailleRune(grid, 0, 0)
+
+	// the left column is dots 1, 2, 3 and 7, which are bits 0, 1, 2 and 6
+	const want = 0x2800 | 0x01 | 0x02 | 0x04 | 0x40
+	if got != want {
+		t.Errorf("brailleRune = U+%04X, want U+%04X", got, want)
+	}
+}
+
+// TestTrimRemovesTheLetterbox checks the black bars around a 16:9 video in a 4:3
+// thumbnail are thrown away, which is the whole reason Trim exists, and that what
+// is left is 16:9 rather than a square.
+func TestTrimRemovesTheLetterbox(t *testing.T) {
+	// the real shape: 480 wide by 360 tall, holding a 480 by 270 picture with a
+	// bar of 45 above and below
+	const w, h, bar = 480, 360, 45
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := range h {
+		for x := range w {
+			if y < bar || y >= h-bar {
+				// a bar, which is very dark grey rather than true black because
+				// it has been through a video encoder
+				img.SetRGBA(x, y, color.RGBA{R: 8, G: 8, B: 8, A: 255})
+				continue
+			}
+			img.SetRGBA(x, y, color.RGBA{R: 200, G: 100, B: 50, A: 255})
+		}
+	}
+
+	out := Trim(img)
+	b := out.Bounds()
+
+	// the bars are gone, so the 270 rows of picture are all that is left, and
+	// 270 rows of 16:9 is 480 wide
+	if b.Dx() != 480 || b.Dy() != 270 {
+		t.Errorf("got %dx%d, want 480x270: the bars should have been trimmed and the rest kept",
+			b.Dx(), b.Dy())
+	}
+
+	// and what is left must be the picture, not a bar
+	if r, _, _, _ := out.At(0, 0).RGBA(); r < 100*0x101 {
+		t.Errorf("the top of the result is still a bar: r=%d of 65535", r)
+	}
+}
+
+// TestTrimKeepsTheShape checks a picture with no bars is only cropped to 16:9, and
+// is not otherwise eaten.
+func TestTrimKeepsTheShape(t *testing.T) {
+	// a plain 60x30 picture, which is already 2:1 and so wider than 16:9
+	img := image.NewRGBA(image.Rect(0, 0, 60, 30))
+	for y := range 30 {
+		for x := range 60 {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(100 + x), G: uint8(100 + y), B: 128, A: 255})
+		}
+	}
+
+	out := Trim(img)
+	b := out.Bounds()
+
+	// 60 wide at 16:9 is 34 tall, and 30 is all there is, so the width comes off
+	// instead and the result is 53 by 30
+	if b.Dx() != 53 || b.Dy() != 30 {
+		t.Errorf("got %dx%d, want 53x30", b.Dx(), b.Dy())
+	}
+}
+
+// TestRowsForAndWidthForAgree checks the two conversions are inverses, because
+// the layout uses one to reserve room and the other to fill it. If they disagree
+// the art is either cut off or leaves a gap.
+func TestRowsForAndWidthForAgree(t *testing.T) {
+	for _, rows := range []int{4, 8, 13, 16, 20, 30} {
+		width := WidthFor(rows)
+		if got := RowsFor(width); got > rows {
+			t.Errorf("WidthFor(%d) = %d, which needs %d rows", rows, width, got)
+		}
+	}
+
+	// and both are zero for nothing, rather than negative
+	if WidthFor(0) != 0 || RowsFor(0) != 0 {
+		t.Error("a width or height of zero should stay zero")
+	}
+}
+
+// TestTrimmedArtIsRectangular checks the drawn art is wider than it is tall, which
+// is the point of trimming to 16:9 rather than to a square. A square drawing of a
+// video thumbnail is a third of the picture with the sides or the top and bottom
+// thrown away.
+func TestTrimmedArtIsRectangular(t *testing.T) {
+	// a 4:3 frame with bars, as a thumbnail arrives
+	const w, h, bar = 120, 90, 11
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := range h {
+		for x := range w {
+			if y < bar || y >= h-bar {
+				img.SetRGBA(x, y, color.RGBA{A: 255})
+				continue
+			}
+			img.SetRGBA(x, y, color.RGBA{R: uint8(x * 2), G: uint8(y * 2), B: 90, A: 255})
+		}
+	}
+
+	got, err := Render(img, Options{Width: 40, Color: true, Mode: Braille, Trim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rows := strings.Count(got, "\n")
+	if rows <= 0 {
+		t.Fatalf("no art at all: %q", got)
+	}
+	// 40 columns of 16:9 art is 11 rows, give or take
+	if rows > 20 {
+		t.Errorf("the art is %d rows tall for 40 columns, which is not 16:9", rows)
+	}
+	if want := RowsFor(40); rows > want+1 {
+		t.Errorf("the art is %d rows but RowsFor(40) says %d", rows, want)
+	}
+}

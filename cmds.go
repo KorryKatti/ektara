@@ -5,6 +5,7 @@ package main
 
 import (
 	"database/sql"
+	"log"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -37,6 +38,21 @@ func searchCmd(db *sql.DB, query string) tea.Cmd {
 	return func() tea.Msg {
 		videos, err := searchYouTube(db, query)
 		return searchedMsg{videos: videos, err: err}
+	}
+}
+
+// recentCmd reads the history in the background, so the first screen has
+// something real on it rather than made up entries.
+func recentCmd(db *sql.DB) tea.Cmd {
+	return func() tea.Msg {
+		tracks, err := historyTracks(db)
+		if err != nil {
+			// no history is not a reason to refuse to start, it is just an empty
+			// list on the screen
+			log.Printf("recent: %v", err)
+			return recentMsg{}
+		}
+		return recentMsg{tracks: tracks}
 	}
 }
 

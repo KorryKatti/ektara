@@ -4,11 +4,16 @@ package main
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"ektara/asciiart"
 )
 
 // TestListWindow pins down the arithmetic that keeps a long list on screen.
@@ -64,15 +69,19 @@ func TestListWindow(t *testing.T) {
 
 // TestListRows checks the screen-height maths, including the sizes a terminal
 // can actually be shrunk to.
+//
+// The numbers come off the frame drawn at the top of draw.go: the height is
+// whatever the title and the six row player bar have not taken, less the box's own
+// padding and the seven lines the list spends on the heading and the key hint.
 func TestListRows(t *testing.T) {
 	cases := []struct {
 		height int
 		want   int
 	}{
-		{0, 10},  // no size reported yet, so a sensible default
-		{30, 18}, // the normal size
-		{12, 3},  // just fits, with the minimum three rows
-		{5, 3},   // absurdly small, but still three rows rather than none
+		{0, 11},  // no size reported yet, so a sensible default
+		{30, 14}, // the normal size
+		{12, 1},  // barely fits under the player bar
+		{5, 1},   // absurdly small, but still one row rather than none
 	}
 	for _, c := range cases {
 		m := model{height: c.height}
@@ -136,7 +145,7 @@ func TestDrawItemsWindows(t *testing.T) {
 	}
 
 	got := m.drawItems()
-	if !strings.Contains(got, "showing 1-18 of 71") {
+	if !strings.Contains(got, "showing 1-14 of 71") {
 		t.Errorf("missing or wrong count line:\n%s", got)
 	}
 	if !strings.Contains(got, "song number 00") {
@@ -407,5 +416,756 @@ func TestDrawMenuShowsTheLastFailure(t *testing.T) {
 	got := m.drawMenu()
 	if !strings.Contains(got, "Sign in to confirm") {
 		t.Errorf("the menu did not say why playback stopped:\n%s", got)
+	}
+}
+
+// TestFrameFitsTheTerminal is the check that the new layout holds together.
+//
+// The screen is built out of fixed height boxes, and lipgloss cuts a box off at
+// the bottom rather than letting it grow. That is what stops a long track title
+// or a big queue from pushing the player bar off the screen. It only works if
+// every screen fits at every size, so this walks the sizes a terminal can
+// actually be, every screen, with the awkward state filled in: a long title, a
+// long error, a full queue, a long list with the cursor in the middle.
+//
+// The rule being checked is the only one that matters: the frame is never wider
+// or taller than the terminal it was told about.
+func TestFrameFitsTheTerminal(t *testing.T) {
+	sizes := [][2]int{
+		{200, 50}, {120, 40}, {100, 30}, {80, 24}, {60, 20}, {40, 10}, {30, 8},
+	}
+	modes := []mode{modeMenu, modeSearch, modeResults, modeFiles, modeHistory, modePlaying}
+
+	for _, size := range sizes {
+		for _, mode := range modes {
+			for _, queueLen := range []int{0, 2, 9} {
+				m := initialModel(nil, nil)
+				m.width, m.height = size[0], size[1]
+				m.mode = mode
+
+				// a track with a title and a link long enough to want clipping
+				m.track = Track{
+					Title:   "a fairly long song title that will want clipping",
+					Stream:  true,
+					PageURL: "https://youtube.com/watch?v=abcdefghijklmnop",
+				}
+				m.elapsed, m.length = 95*time.Second, 252*time.Second
+				for i := 0; i < queueLen; i++ {
+					m.queue = append(m.queue, m.track)
+				}
+				m.index = 0
+
+				// the messages, the list, and the cursor in the middle of it
+				m.lastError = "Playback failed: Sign in to confirm you're not a bot"
+				m.notice = "volume 60%"
+				m.menuCursor = 3
+				m.spin = 7
+				m.searchInput = "lofi"
+				m.searching = true
+				for i := 0; i < 71; i++ {
+					m.items = append(m.items, item{title: fmt.Sprintf("song number %02d", i)})
+				}
+				m.itemCursor = 35
+
+				got := m.View().Content
+				if w := lipgloss.Width(got); w > m.width {
+					t.Errorf("mode %d, queue %d, at %dx%d: width %d overflows",
+						mode, queueLen, m.width, m.height, w)
+				}
+				if h := strings.Count(got, "\n") + 1; h > m.height {
+					t.Errorf("mode %d, queue %d, at %dx%d: height %d overflows",
+						mode, queueLen, m.width, m.height, h)
+				}
+			}
+		}
+	}
+}
+
+// TestFrameShowsTheSamePartsEverywhere checks the frame really is one frame: the
+// title, the menu and the player bar are drawn the same way whatever the screen
+// is. A layout that changed shape as you moved between screens is what makes a
+// program feel like it is jumping about under you.
+func TestFrameShowsTheSamePartsEverywhere(t *testing.T) {
+	modes := []mode{modeMenu, modeSearch, modeResults, modeFiles, modeHistory, modePlaying}
+
+	for _, mode := range modes {
+		m := initialModel(nil, nil)
+		m.width, m.height = 100, 30
+		m.mode = mode
+		m.track = Track{Title: "Midnight City", Stream: true, PageURL: "https://youtube.com/watch?v=abc"}
+		m.elapsed, m.length = 95*time.Second, 252*time.Second
+
+		got := m.View().Content
+
+		if !strings.Contains(got, "Ektara") {
+			t.Errorf("mode %d: no title", mode)
+		}
+		for _, choice := range menuItems {
+			if !strings.Contains(got, choice) {
+				t.Errorf("mode %d: the menu is missing %q", mode, choice)
+			}
+		}
+		if !strings.Contains(got, "Midnight City") {
+			t.Errorf("mode %d: the player bar does not say what is playing", mode)
+		}
+		if !strings.Contains(got, "1:35 / 4:12") {
+			t.Errorf("mode %d: the player bar has no progress", mode)
+		}
+	}
+}
+
+// TestMenuNamesAreShortEnough guards the sidebar against the one thing that
+// would break it: a name too long for 24 columns would wrap onto a second line
+// and push the rest of the menu down.
+func TestMenuNamesAreShortEnough(t *testing.T) {
+	// the sidebar is 24 wide and pads one column each side, so 22 are left
+	const room = sidebarWidth - 2
+
+	for _, name := range menuItems {
+		if lipgloss.Width(name) > room {
+			t.Errorf("menu entry %q is %d wide, the sidebar has %d",
+				name, lipgloss.Width(name), room)
+		}
+	}
+}
+
+// TestMenuDescriptionsLineUp checks the two menu lists are the same length, since
+// one is indexed by the cursor into the other. A short descriptions list would
+// mean the last rows of the menu have nothing to say about themselves.
+func TestMenuDescriptionsLineUp(t *testing.T) {
+	if len(menuItems) != len(menuDescriptions) {
+		t.Errorf("%d menu entries but %d descriptions", len(menuItems), len(menuDescriptions))
+	}
+
+	m := initialModel(nil, nil)
+	for i := range menuItems {
+		m.menuCursor = i
+		if m.menuDescription() == "" {
+			t.Errorf("menu entry %d (%q) has no description", i, menuItems[i])
+		}
+	}
+
+	// a cursor off the end of the list must not read past it
+	m.menuCursor = len(menuItems) + 5
+	if got := m.menuDescription(); got != "" {
+		t.Errorf("a cursor past the end returned %q", got)
+	}
+}
+
+// TestErrorsAreAlwaysVisible checks the message the program most needs to say is
+// not the one it drops first.
+//
+// The middle box is cut off at the bottom to keep it the size of the terminal,
+// so whatever a screen drew last would be the first to go. The frame makes room
+// for the errors before the cutting instead, which is why they survive on a
+// screen that is completely full.
+func TestErrorsAreAlwaysVisible(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.width, m.height = 80, 24
+	m.mode = modeMenu
+
+	// a failure, then something even newer to say
+	m.lastError = "Playback failed: Sign in to confirm you're not a bot"
+	m.notice = "volume 60%"
+
+	got := m.View().Content
+	if !strings.Contains(stripped(got), "Sign in to confirm") {
+		t.Errorf("the failure is missing:\n%s", stripped(got))
+	}
+	if !strings.Contains(stripped(got), "volume 60%") {
+		t.Errorf("the notice is missing:\n%s", stripped(got))
+	}
+
+	// and on the screens where the errors do not belong in the drawing code at
+	// all, which is all of them now
+	for _, mode := range []mode{modeSearch, modeResults, modeFiles, modeHistory, modePlaying} {
+		m.mode = mode
+		if !strings.Contains(stripped(m.View().Content), "Sign in to confirm") {
+			t.Errorf("mode %d: the failure is missing", mode)
+		}
+	}
+}
+
+// stripped removes the colour codes, so a test can look for words rather than
+// for a whole styled line.
+func stripped(s string) string {
+	var b strings.Builder
+	inCode := false
+	for _, r := range s {
+		switch {
+		case r == 0x1b:
+			inCode = true
+		case inCode && (r == 'm' || r == 'K'):
+			inCode = false
+		case !inCode:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// TestNothingPrintedIsAWrap checks the player bar holds its shape. Its three
+// lines are a fixed height, so a long title or a long link that wrapped onto a
+// second line would push the bottom of the screen off the terminal. Every line
+// is clipped to the width instead.
+func TestNothingPrintedIsAWrap(t *testing.T) {
+	for _, size := range [][2]int{{200, 50}, {100, 30}, {80, 24}, {60, 20}, {40, 10}} {
+		m := initialModel(nil, nil)
+		m.width, m.height = size[0], size[1]
+		m.track = Track{
+			Title:   strings.Repeat("a very long song title ", 10),
+			Stream:  true,
+			PageURL: "https://youtube.com/watch?v=" + strings.Repeat("x", 100),
+		}
+		m.elapsed, m.length = 95*time.Second, 252*time.Second
+		m.notice = strings.Repeat("a long notice ", 20)
+
+		got := m.View().Content
+		if w := lipgloss.Width(got); w > m.width {
+			t.Errorf("at %dx%d: width %d overflows", m.width, m.height, w)
+		}
+		if h := strings.Count(got, "\n") + 1; h > m.height {
+			t.Errorf("at %dx%d: height %d overflows", m.width, m.height, h)
+		}
+	}
+}
+
+// TestGreetingDoesNotChange checks the first screen says the same thing every
+// time it is drawn.
+//
+// The screen is drawn ten times a second, and the greeting used to be worked out
+// while drawing, picking a random line each time. That made the text flicker too
+// fast to read, which is worse than not having one at all. It is picked once now,
+// when the model is built, so this draws the menu a hundred times and expects one
+// line every time.
+func TestGreetingDoesNotChange(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.width, m.height = 80, 24
+	m.mode = modeMenu
+
+	if m.greeting == "" {
+		t.Fatal("the model was built with no greeting")
+	}
+
+	first := m.View().Content
+	for i := 0; i < 100; i++ {
+		if got := m.View().Content; got != first {
+			t.Fatalf("frame %d differs from the first", i)
+		}
+	}
+}
+
+// TestTimeMsgSuitsTheHour checks the greeting is not just any line. Each band of
+// the day has its own pool, and a line from the wrong band is as wrong as no
+// greeting at all: "it's high noon" at four in the morning.
+//
+// The greeting is a random pick, so each hour is asked a hundred times and every
+// single answer has to be one of that hour's own lines.
+func TestTimeMsgSuitsTheHour(t *testing.T) {
+	hours := []int{2, 7, 12, 15, 20, 23}
+
+	for _, hour := range hours {
+		allowed := greetingPool(hour)
+		if len(allowed) == 0 {
+			t.Errorf("%02d:00 has no greetings at all", hour)
+			continue
+		}
+
+		for i := 0; i < 100; i++ {
+			got := timeMsgFor(hour)
+			if !slices.Contains(allowed, got) {
+				t.Errorf("%02d:00: the greeting was %q, which is not one of that hour's %d lines",
+					hour, got, len(allowed))
+			}
+		}
+	}
+}
+
+// TestEachHourHasItsOwnPool checks the bands do not overlap. If two bands shared
+// a line then the test above would pass while the greeting was plainly wrong for
+// one of them, which is the sort of thing that looks fine until someone runs it at
+// the wrong time of day.
+func TestEachHourHasItsOwnPool(t *testing.T) {
+	// the bands, and the hour that picks each one
+	hours := []int{2, 7, 12, 15, 20, 23}
+
+	for i := 0; i < len(hours); i++ {
+		for j := i + 1; j < len(hours); j++ {
+			first, second := hours[i], hours[j]
+			for _, line := range greetingPool(first) {
+				if slices.Contains(greetingPool(second), line) {
+					t.Errorf("%02d:00 and %02d:00 both use %q", first, second, line)
+				}
+			}
+		}
+	}
+}
+
+// TestFrameFillsTheTerminalExactly checks the frame covers the whole screen: one
+// line fewer and the bottom row is never drawn, so the terminal's own background
+// shows through the player bar. That is the transparency you can see along the
+// bottom, and it is an off by one rather than anything to do with colour.
+//
+// lipgloss counts a border as part of a style's height, so the height of the
+// player bar and the height taken off the terminal for it have to be the same
+// number. When they were not, the frame was one line short at every size.
+func TestFrameFillsTheTerminalExactly(t *testing.T) {
+	sizes := [][2]int{{200, 50}, {120, 40}, {100, 30}, {80, 24}, {60, 20}, {40, 10}}
+
+	for _, size := range sizes {
+		for _, mode := range []mode{modeMenu, modeSearch, modeResults, modePlaying} {
+			m := initialModel(nil, nil)
+			m.width, m.height = size[0], size[1]
+			m.mode = mode
+			m.track = Track{Title: "Midnight City"}
+
+			got := m.View().Content
+			rows := strings.Count(got, "\n") + 1
+			if rows != m.height {
+				t.Errorf("mode %d at %dx%d: the frame is %d lines, the terminal is %d",
+					mode, m.width, m.height, rows, m.height)
+			}
+		}
+	}
+}
+
+// TestEveryRowHasABackground is the check for a transparent screen.
+//
+// The frame is a background colour with text on it, and a cell with no
+// background of its own is left showing whatever the terminal's background is. On
+// most terminals that is a dark grey nobody notices. On one with a transparent
+// background it is the desktop, and the screen gets bright bands across it where
+// the program forgot to say what colour a row is.
+//
+// The border along the bottom was the row doing this: it had a foreground colour
+// for the line and no background for the space around it, so the whole row came
+// through. Checking the width of every row cannot see this, because the row is
+// the right width. It has to be the colour that is checked.
+func TestEveryRowHasABackground(t *testing.T) {
+	// a background colour, either as 24-bit rgb or as one of the sixteen
+	background := regexp.MustCompile(`(?:48;2;\d+;\d+;\d+|4[0-7];)`)
+
+	sizes := [][2]int{{200, 50}, {120, 40}, {100, 30}, {80, 24}, {60, 20}}
+
+	for _, size := range sizes {
+		for _, mode := range []mode{modeMenu, modeSearch, modeResults, modeFiles, modeHistory, modePlaying} {
+			m := initialModel(nil, nil)
+			m.width, m.height = size[0], size[1]
+			m.mode = mode
+			m.track = Track{Title: "Born of a Star", Stream: true, PageURL: "https://youtube.com/watch?v=abc"}
+			m.elapsed, m.length = 7*time.Second, 288*time.Second
+			m.lastError = "Playback failed"
+			m.notice = "volume 60%"
+			m.spin = 3
+			m.items = nil
+			for i := range 9 {
+				m.items = append(m.items, item{title: fmt.Sprintf("result %d", i)})
+			}
+			m.itemCursor = 4
+
+			for i, row := range strings.Split(m.View().Content, "\n") {
+				if !background.MatchString(row) {
+					t.Errorf("mode %d at %dx%d: row %d has no background colour, "+
+						"so a transparent terminal shows through it", mode, m.width, m.height, i)
+				}
+			}
+		}
+	}
+}
+
+// TestTheFrameHasThreeColumnsWhenThereIsRoom checks the menu and the queue are
+// both on screen together, and that they give way in the right order as the
+// terminal narrows.
+//
+// The menu goes first because it is the thing the user came to look at being
+// least: content is worth more than navigation, and content is worth more than a
+// queue. Below that only the content is left, which is better than three
+// unusable columns.
+func TestTheFrameHasThreeColumnsWhenThereIsRoom(t *testing.T) {
+	cases := []struct {
+		width          int
+		sidebar, queue bool
+		wantContent    int
+	}{
+		{200, true, true, 200 - sidebarWidth - queueWidth},
+		{120, true, true, 120 - sidebarWidth - queueWidth},
+		{84, true, true, 84 - sidebarWidth - queueWidth}, // exactly enough for all three
+		{83, true, false, 83 - sidebarWidth},             // one column short: the queue goes
+		{60, true, false, 60 - sidebarWidth},             // only the menu fits
+		{53, false, false, 53},                           // not even the menu
+		{40, false, false, 40},
+	}
+
+	for _, c := range cases {
+		m := initialModel(nil, nil)
+		m.width, m.height = c.width, 30
+
+		if got := m.showSidebar(); got != c.sidebar {
+			t.Errorf("width %d: showSidebar = %v, want %v", c.width, got, c.sidebar)
+		}
+		if got := m.showQueue(); got != c.queue {
+			t.Errorf("width %d: showQueue = %v, want %v", c.width, got, c.queue)
+		}
+		if got := m.contentWidth(); got != c.wantContent {
+			t.Errorf("width %d: contentWidth = %d, want %d", c.width, got, c.wantContent)
+		}
+	}
+}
+
+// TestTheColumnsAddUpToTheTerminal is the arithmetic behind the frame. The three
+// columns have to add up to exactly the terminal width, or the right hand one
+// hangs off the side and the middle one is not where it looks.
+func TestTheColumnsAddUpToTheTerminal(t *testing.T) {
+	for _, width := range []int{84, 100, 120, 160, 200, 240} {
+		m := initialModel(nil, nil)
+		m.width, m.height = width, 30
+
+		total := m.contentWidth()
+		if m.showSidebar() {
+			total += sidebarWidth
+		}
+		if m.showQueue() {
+			total += queueWidth
+		}
+
+		if total != width {
+			t.Errorf("width %d: the columns add up to %d", width, total)
+		}
+	}
+}
+
+// TestTheBarIsSixRowsAndFits checks the player bar is exactly as tall as the
+// layout says it is. It grew from four rows to six when the volume and the
+// transport moved onto their own lines, and if the two numbers ever disagree the
+// bottom of the screen is either left unpainted or pushed off the terminal.
+func TestTheBarIsSixRowsAndFits(t *testing.T) {
+	for _, width := range []int{60, 80, 100, 120, 200} {
+		m := initialModel(nil, nil)
+		m.width, m.height = width, 30
+		m.track = Track{Title: "Born of a Star"}
+		m.elapsed, m.length = 95*time.Second, 288*time.Second
+
+		bar := playerStyle.Width(width).Height(playerBlockHeight).Render(m.drawPlayerBar())
+		if got := strings.Count(bar, "\n") + 1; got != playerBlockHeight {
+			t.Errorf("width %d: the bar is %d rows, playerBlockHeight is %d",
+				width, got, playerBlockHeight)
+		}
+	}
+}
+
+// TestTheTitleIsCentred checks the song title sits in the middle of the bar. It
+// is the one line on the bar that is about the music rather than the controls, so
+// it is the one that belongs in the middle.
+func TestTheTitleIsCentred(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.width, m.height = 100, 30
+	m.track = Track{Title: "Midnight City"}
+	m.elapsed, m.length = 95*time.Second, 288*time.Second
+
+	first := strings.Split(m.drawPlayerBar(), "\n")[0]
+	plain := stripped(first)
+
+	// the title is on the line, with the same number of spaces either side
+	left := len(plain) - len(strings.TrimLeft(plain, " "))
+	right := len(plain) - len(strings.TrimRight(plain, " "))
+
+	if !strings.Contains(plain, "Midnight City") {
+		t.Fatalf("the title is not on the first line: %q", plain)
+	}
+	// an odd number of spare columns cannot be split exactly, so being one out
+	// is as centred as it gets
+	if left-right > 1 || right-left > 1 {
+		t.Errorf("the title is not centred: %d spaces before, %d after", left, right)
+	}
+}
+
+// TestVolumeAndTransportAreBelowTheProgressBar checks the bar is in the order
+// asked for: title, then the progress bar, then the volume and the transport
+// underneath it rather than sharing a line with the bar.
+func TestVolumeAndTransportAreBelowTheProgressBar(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.width, m.height = 120, 30
+	m.track = Track{Title: "Midnight City"}
+	m.elapsed, m.length = 95*time.Second, 288*time.Second
+	m.volume = 0.6
+
+	lines := strings.Split(stripped(m.drawPlayerBar()), "\n")
+
+	// the progress bar and the times are on the second line
+	if len(lines) < 5 {
+		t.Fatalf("the bar is only %d lines", len(lines))
+	}
+	if !strings.Contains(lines[1], "1:35 / 4:48") {
+		t.Errorf("line 1 is not the progress bar: %q", lines[1])
+	}
+
+	// the volume and the transport are on the line below it
+	below := strings.Join(lines[2:], "\n")
+	if !strings.Contains(below, "60%") {
+		t.Errorf("the volume is not below the progress bar:\n%s", below)
+	}
+	if !strings.Contains(below, "prev") || !strings.Contains(below, "next") {
+		t.Errorf("the transport buttons are not below the progress bar:\n%s", below)
+	}
+
+	// and the volume is on the left with the buttons on the right
+	transport := lines[3]
+	if strings.Index(transport, "vol") > strings.Index(transport, "prev") {
+		t.Errorf("the volume is not left of the buttons: %q", transport)
+	}
+}
+
+// TestArrowKeysSeek checks left and right move the playhead, and that up and down
+// do not, because there is no list on the player screen for them to move through.
+func TestArrowKeysSeek(t *testing.T) {
+	// a player is needed, because seeking is the player's job and a model built
+	// with none of them does nothing on any key
+	player := &fakeAudio{}
+
+	for _, c := range []struct {
+		name string
+		code rune
+	}{
+		{"left", tea.KeyLeft},
+		{"right", tea.KeyRight},
+	} {
+		m := initialModel(nil, player)
+		m.mode = modePlaying
+		m.track = Track{Title: "Midnight City"}
+		m.length = 288 * time.Second
+
+		next, _ := m.onKey(tea.KeyPressMsg(tea.Key{Code: c.code}))
+		if next == nil {
+			t.Errorf("the %s arrow produced no model", c.name)
+		}
+	}
+
+	// up and down are deliberately not bound on this screen: there is no list
+	// here for them to move a cursor through, so they are two keys that would
+	// silently do nothing.
+	for _, code := range []rune{tea.KeyUp, tea.KeyDown} {
+		m := initialModel(nil, player)
+		m.mode = modePlaying
+		m.track = Track{Title: "Midnight City"}
+		m.length = 288 * time.Second
+
+		before := m.startTime
+		m.onKey(tea.KeyPressMsg(tea.Key{Code: code}))
+		if m.startTime != before {
+			t.Errorf("the up or down arrow moved the playhead")
+		}
+	}
+
+	// the hint line has to say so, or nobody knows the arrows do anything
+	m := initialModel(nil, player)
+	hints := stripped(m.keyHints())
+	if !strings.Contains(hints, "←") || !strings.Contains(hints, "→") {
+		t.Errorf("the key hints do not mention the arrows: %q", hints)
+	}
+}
+
+// TestANoticeNeverResizesTheCover is the bug from the other side: whatever the
+// cover is sized from, it must not change while one track plays.
+//
+// The cover is drawn once and kept, keyed by the track and the width it was drawn
+// at. A width that moved during a track would mean the drawing was thrown away
+// with nothing to replace it, and the cover would blink out every time a key was
+// pressed. Volume, shuffle, repeat and mute all raise a notice, so every one of
+// them is a thing the user does often.
+func TestANoticeNeverResizesTheCover(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.width, m.height = 120, 34
+	m.mode = modePlaying
+	m.track = Track{ID: "stable", Title: "Midnight City"}
+
+	width := m.artWidth()
+	key := artKey(m.track, width)
+
+	// everything a key press can do to the model that touches a message
+	for _, change := range []func(*model){
+		func(m *model) { m.notice = "volume 60%" },
+		func(m *model) { m.notice = "volume 65%" },
+		func(m *model) { m.notice = "shuffle on" },
+		func(m *model) { m.notice = "repeat on" },
+		func(m *model) { m.notice = "muted" },
+		func(m *model) { m.notice = "" },
+		func(m *model) { m.volume = 0.1 },
+		func(m *model) { m.volume = 0.9 },
+		func(m *model) { m.muted = true },
+		func(m *model) { m.paused = true },
+		func(m *model) { m.spin++ },
+		func(m *model) { m.elapsed += time.Second },
+	} {
+		change(&m)
+
+		if got := m.artWidth(); got != width {
+			t.Errorf("the cover width moved to %d, was %d", got, width)
+		}
+		if got := artKey(m.track, m.artWidth()); got != key {
+			t.Errorf("the cover key moved to %q, was %q", got, key)
+		}
+	}
+}
+
+// sgrState is defined in sgr.go, which is a small model of how a terminal reads
+// the colour codes in a line.
+
+// TestNoCellIsLeftUnpainted is the test for a transparent screen.
+//
+// The frame is a background colour with text on it, so every cell needs a
+// background of its own. A cell without one is left showing the terminal's own
+// background, which is invisible on a dark terminal and is the desktop showing
+// through on a transparent one.
+//
+// This walks the frame the way a terminal walks it, tracking the colour state
+// cell by cell, rather than looking for a background code somewhere in each
+// line. That distinction is the whole point: a line can contain a background code
+// and still leave most of itself unpainted. That is exactly what happened twice
+// here, once because a border had a foreground but no background, and once
+// because every coloured run of text ended in a full reset, which took the box's
+// background with it and left the padding to either side of the text unpainted.
+func TestNoCellIsLeftUnpainted(t *testing.T) {
+	for _, size := range [][2]int{{200, 50}, {160, 44}, {120, 36}, {100, 30}, {84, 24}, {60, 20}} {
+		for _, mode := range []mode{modeMenu, modeSearch, modeResults, modeFiles, modeHistory, modePlaying} {
+			m := modelWithEverything(size[0], size[1], mode)
+
+			for row, line := range strings.Split(m.View().Content, "\n") {
+				var st sgrState
+				col := 0
+
+				runes := []rune(line)
+				for i := 0; i < len(runes); i++ {
+					// an escape sequence
+					if runes[i] == 0x1b && i+1 < len(runes) && runes[i+1] == '[' {
+						end := i + 2
+						for end < len(runes) && runes[end] != 'm' {
+							end++
+						}
+						if end < len(runes) {
+							st = st.apply(string(runes[i+2 : end]))
+						}
+						i = end
+						continue
+					}
+
+					// the end of the line, not a cell
+					if runes[i] == '\n' {
+						continue
+					}
+
+					col++
+					if !st.hasBackground() {
+						t.Errorf("%dx%d mode %d: row %d column %d is unpainted, character %q",
+							m.width, m.height, mode, row, col, runes[i])
+						return
+					}
+				}
+			}
+		}
+	}
+}
+
+// modelWithEverything builds a model in the worst state the drawing code can be
+// asked for: a track playing with a cover, a full queue, a long title, a notice,
+// a failure, a long list with the cursor in the middle of it and a history to
+// show. Every screen is then drawn with all of that in place, so a line that only
+// goes wrong when everything is set is still covered.
+func modelWithEverything(width, height int, mode mode) model {
+	m := initialModel(nil, nil)
+	m.width, m.height = width, height
+	m.mode = mode
+
+	m.track = Track{
+		ID:       "dQw4w9WgXcQ",
+		Title:    "Never Gonna Give You Up (Official Music Video) (4K Remaster)",
+		Stream:   true,
+		PageURL:  "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		Filename: "dQw4w9WgXcQ youtube - Never Gonna Give You Up.mp3",
+	}
+	m.elapsed, m.length = 95*time.Second, 213*time.Second
+	m.paused = true
+	m.opts.shuffle = true
+	m.opts.repeat = true
+	m.notice = "volume 60%"
+	m.lastError = "Playback failed: Sign in to confirm you're not a bot"
+	m.menuCursor = 3
+	m.spin = 5
+	m.searchInput = "lofi girl"
+	m.searching = true
+	m.itemCursor = 20
+	m.index = 3
+
+	song := Track{Title: "a song in the list", ID: "x"}
+	for range 40 {
+		m.items = append(m.items, item{title: song.Title, track: song})
+		m.recent = append(m.recent, song)
+		m.queue = append(m.queue, song)
+	}
+
+	// and a cover, as the background fetch would have left it
+	next, _ := m.onArt(artMsg{key: artKey(m.track, m.artWidth()), art: coverArt(m.artWidth())})
+	return next.(model)
+}
+
+// TestTheArtFitsTheRoomItWasGiven checks the cover is never taller than the rows
+// reserved for it.
+//
+// The width is worked out before the picture has arrived, from the shape a
+// thumbnail is, and the picture is then drawn at that width. If the two disagree
+// about how tall it comes out, the art is taller than its slot and the middle box
+// is cut off in the middle of the picture. This is the check on that: the room
+// is reserved from one function and the art is measured off the other.
+func TestTheArtFitsTheRoomItWasGiven(t *testing.T) {
+	for _, size := range [][2]int{{240, 70}, {200, 50}, {160, 44}, {120, 36}, {100, 30}, {84, 24}, {60, 20}, {40, 12}} {
+		for _, mode := range []mode{modeMenu, modePlaying} {
+			m := modelWithEverything(size[0], size[1], mode)
+
+			reserved := m.playerArtRows()
+			if mode == modeMenu {
+				reserved = m.menuArtRows()
+			}
+
+			width := m.artWidth()
+			if width == 0 {
+				continue // too narrow for a picture, which is allowed
+			}
+
+			// what the art is actually drawn at, and how many rows that is. The
+			// render ends every line with a newline, so the count is the number of
+			// newlines and not one more than that.
+			art := coverArt(width)
+			drawn := strings.Count(art, "\n")
+
+			if drawn > reserved {
+				t.Errorf("%dx%d mode %d: %d columns of art is %d rows but only %d were reserved",
+					m.width, m.height, mode, width, drawn, reserved)
+			}
+
+			// and the two functions that work the shape out must agree with the
+			// renderer about it
+			if got, want := asciiart.RowsFor(width), drawn; got != want {
+				t.Errorf("%dx%d mode %d: at %d columns RowsFor says %d rows and the art came out %d",
+					m.width, m.height, mode, width, got, want)
+			}
+		}
+	}
+}
+
+// TestTheArtIsWiderThanItIsTall checks the cover comes out the shape of a video
+// thumbnail rather than a square. A square drawing of a 16:9 picture is a third
+// of the picture thrown away.
+func TestTheArtIsWiderThanItIsTall(t *testing.T) {
+	m := modelWithEverything(150, 40, modePlaying)
+	width := m.artWidth()
+	if width == 0 {
+		t.Fatal("no art at this size")
+	}
+
+	art := coverArt(width)
+	rows := strings.Count(art, "\n")
+	cols := len([]rune(strings.SplitN(art, "\n", 2)[0]))
+
+	if rows >= cols {
+		t.Errorf("the art is %d rows by %d columns, which is not a 16:9 thumbnail", rows, cols)
 	}
 }

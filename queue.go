@@ -53,12 +53,23 @@ func (m *model) startTrack() tea.Cmd {
 	// ready, because opening a stream takes a second and a presence that lags
 	// behind the music looks broken.
 	//
+	// The cover is asked for here for the same reason: it is a download, and it
+	// goes out with everything else rather than when the screen happens to redraw.
+	// The drawing is cleared first, because the one on the model belongs to
+	// whichever track was playing before this one.
+	m.art = ""
+	m.artKey = artKey(m.track, m.artWidth())
+
 	// No tick here. onTick batches one of its own onto whatever this returns,
 	// so the chain that Init started keeps being renewed, and starting a second
 	// one here would make the display repaint twice as fast for the rest of the
 	// session. The callers that are not onTick, which is the a and d keys and
 	// picking a track, rely on the existing chain still running.
-	return tea.Batch(openTrackCmd(m.player, m.track), m.presence.showCmd(m.track, m.startTime))
+	return tea.Batch(
+		openTrackCmd(m.player, m.track),
+		m.presence.showCmd(m.track, m.startTime),
+		artCmd(m.track, m.artWidth()),
+	)
 }
 
 // stopTrack ends the audio but keeps the player, and the open audio device,

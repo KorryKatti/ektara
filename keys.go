@@ -271,9 +271,15 @@ func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.presence.hideCmd()
 
-	case "h":
+	// The left and right arrows seek, which is what a play/pause bar with a
+	// progress line in it makes you expect. h and l still work, because they
+	// were here first and there is no reason to take them away.
+	//
+	// Up and down are not bound here: this screen has no list to move a cursor
+	// through, so they would be two keys that do nothing.
+	case "left", "h":
 		return m.seek(-5 * time.Second)
-	case "k", "l":
+	case "right", "l":
 		return m.seek(5 * time.Second)
 
 	case "a":

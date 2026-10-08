@@ -27,14 +27,40 @@ const (
 	modePlaying             // the player
 )
 
-// menuItems are the choices on the first screen, in the order they are shown.
+// menuItems are the choices down the left, in the order they are shown. The
+// names are short so they sit on one line each in the sidebar.
+//
+// The iota constants below count these in the same order, so the first entry
+// here is menuOnline and so on. Adding one means adding a constant too.
 var menuItems = []string{
-	"Online  - search YouTube and download",
-	"Offline - play an mp3 in this folder",
-	"History - play something already played",
-	"Stream  - play from YouTube without downloading",
-	"Queue   - play several tracks one after another",
+	"Download",
+	"Offline",
+	"History",
+	"Stream",
+	"Queue",
 	"Quit",
+}
+
+// menuDescriptions say what each choice does, one line each, in the same order
+// as menuItems. They are too long for the sidebar, so the menu screen shows the
+// one for whatever the cursor is on, in the middle box.
+var menuDescriptions = []string{
+	"search YouTube and save it to disk",
+	"play an mp3 already in this folder",
+	"play something played before",
+	"play from YouTube without saving it",
+	"play several tracks one after another",
+	"leave",
+}
+
+// menuDescription is the line for whichever row the cursor is on. It falls back
+// to nothing if the two lists ever get out of step, rather than reading past the
+// end of one of them.
+func (m model) menuDescription() string {
+	if m.menuCursor < 0 || m.menuCursor >= len(menuDescriptions) {
+		return ""
+	}
+	return menuDescriptions[m.menuCursor]
 }
 
 // The indexes of the menu rows, named so the code below can say menuSearch
@@ -75,6 +101,13 @@ type searchedMsg struct {
 type downloadedMsg struct {
 	track Track
 	err   error
+}
+
+// recentMsg says the history has been read, and carries it. An empty list with
+// no error means there is nothing to show, which is different from not having
+// looked yet.
+type recentMsg struct {
+	tracks []Track
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +151,16 @@ type model struct {
 	// them, so they share one set of fields instead of three.
 	items      []item
 	itemCursor int
+
+	// recent is the history, most recent first, read once when the program
+	// starts so the first screen has something real to show.
+	//
+	// It is kept on the model rather than read while drawing, because drawing
+	// happens ten times a second on the one goroutine that owns the screen and a
+	// database query there would freeze the program. It is a snapshot: nothing
+	// updates it while ektara runs, so a song played now turns up on the first
+	// screen the next time the program is started.
+	recent []Track
 
 	// --- the queue being built ---
 	// queueWanted is how many tracks are still to be picked. 0 means no queue
@@ -164,6 +207,21 @@ type model struct {
 	// is what makes its elapsed clock survive a pause.
 	startTime time.Time
 
+	// greeting is the line of text on the first screen. It is worked out once
+	// here and then never touched, because View is called ten times a second and
+	// picking a new line each time would make the text flicker on every frame.
+	greeting string
+
+	// art is the cover for the current track, already drawn as text, and artKey
+	// is the track and width it was drawn for.
+	//
+	// Both are needed because the drawing arrives late: it is fetched in the
+	// background, so by the time it lands the user may have skipped to another
+	// track or resized the window. The key says what the drawing is actually of,
+	// so a late answer is dropped rather than shown against the wrong song.
+	art    string
+	artKey string
+
 	// presence is the Discord connection. It is a pointer because there is one
 	// for the session, like the player, and because it carries its own lock for
 	// the commands that talk to it off the display's goroutine.
@@ -206,6 +264,11 @@ func initialModel(db *sql.DB, a audio) model {
 		// model with no presence to ask. It does not connect on construction,
 		// so this costs nothing.
 		presence: newPresence(discordAppID),
+		// Picked once, here, and kept for the whole run. The screen is drawn ten
+		// times a second, so a greeting worked out while drawing would be a
+		// different line on every frame and would never sit still long enough to
+		// be read.
+		greeting: timeMsg(),
 	}
 }
 
@@ -216,7 +279,17 @@ func (m model) Init() tea.Cmd {
 	// it is a socket write and this is the goroutine that draws. A Discord that
 	// is not running logs that and leaves the player alone; it is never a
 	// reason to fail to start.
-	return tea.Batch(tick(), m.presence.hideCmd())
+	//
+	// The history is read in the background too, so the first screen has
+	// something real on it. The handle is the one on the model, and a nil one
+	// asks for no history rather than panicking, because a model built by hand
+	// rather than by initialModel has no database.
+	var cmds []tea.Cmd
+	if m.db != nil {
+		cmds = append(cmds, recentCmd(m.db))
+	}
+
+	return tea.Batch(append(cmds, tick(), m.presence.hideCmd())...)
 }
 
 // Update is the whole program: a message arrives, the model changes, and
@@ -228,7 +301,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the terminal has told us how big it is. Nothing else uses this.
 		m.width = msg.Width
 		m.height = msg.Height
-		return m, nil
+		// the cover is drawn to fit, so a new size means a new drawing, and the
+		// one on the model is the wrong shape now
+		m.art = ""
+		m.artKey = ""
+		return m, m.wantArt()
 
 	case tickMsg:
 		// The presence gets its turn here rather than inside onTick, because
@@ -254,6 +331,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case downloadedMsg:
 		return m.onDownloaded(msg)
+
+	case recentMsg:
+		m.recent = msg.tracks
+		return m, nil
+
+	case artMsg:
+		return m.onArt(msg)
 
 	case tea.KeyPressMsg:
 		return m.onKey(msg)

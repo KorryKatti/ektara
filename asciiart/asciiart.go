@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	_ "image/jpeg" // registered so Decode accepts the formats the original did
 	_ "image/png"
 	"io"
@@ -82,6 +83,16 @@ const (
 	// resolution of Mono at the same width, and it is what makes the colour
 	// worth having.
 	HalfBlock
+
+	// Braille puts eight pixels in each cell, two across and four down, using the
+	// dot matrix that every Unicode braille character carries. Four times the
+	// detail of HalfBlock in the same space, which is the most a terminal will
+	// give without being asked to draw a real image.
+	//
+	// The dots are on or off and the colour is one per cell, so this draws a
+	// tinted stipple rather than true colour. On a photograph that reads as far
+	// more detail than a half block does, which is the point.
+	Braille
 )
 
 // Options controls how an image is converted. The zero value is usable and
@@ -101,6 +112,25 @@ type Options struct {
 
 	// Mode is how each pixel becomes a character. The zero value is Mono.
 	Mode Mode
+
+	// Trim takes a flat black border off the picture before drawing it and crops
+	// what is left to the shape of a video thumbnail. It is meant for thumbnails,
+	// which are 4:3 frames holding a 16:9 picture with black bars above and
+	// below, where a fifth of the picture is bar and the middle is too small to
+	// read.
+	//
+	// See Trim for what it does to a picture that has no bars.
+	Trim bool
+
+	// Background is the colour to fill the gaps in the picture with, in Braille
+	// mode. A braille character is mostly empty space, so without a background
+	// every gap between the dots shows whatever is behind the drawing, which on a
+	// terminal with a transparent background is the desktop. Set it to the colour
+	// the art is drawn on and the gaps become that colour.
+	//
+	// It is ignored by the other modes: a half block and a mono character both
+	// fill their whole cell, so they have no gaps and no need of one.
+	Background color.Color
 }
 
 // RenderSource converts the picture at src, which is either an http or https
@@ -158,6 +188,138 @@ func RenderFile(path string, opts Options) (string, error) {
 	return Render(img, opts)
 }
 
+// thumbnailWide and thumbnailTall are the shape of a video thumbnail once its
+// black bars are off, which is the shape everything here is drawn at.
+//
+// It is exported because the caller has to reserve the right number of rows for
+// the art before the art arrives, and working the ratio out in two places is how
+// the two drift apart.
+const (
+	thumbnailWide = 16
+	thumbnailTall = 9
+
+	// a cell is about twice as tall as it is wide, so a picture that is n cells
+	// wide is n cells by 2n on screen. The ratio of the picture is what decides
+	// how many of those rows it fills.
+	cellTall = 2
+)
+
+// RowsFor is how many lines a thumbnail drawn width columns wide takes up.
+//
+// The caller needs this to reserve room for the art in a fixed height box, and
+// it needs it before the art exists, so it is worked out from the shape rather
+// than measured off a drawing that has not arrived.
+//
+// It rounds up, the way the renderer does, so the answer is never smaller than
+// what actually gets drawn. Rounding down would leave the art a row taller than
+// the room it was given, and the box would be cut off in the middle of the
+// picture.
+func RowsFor(width int) int {
+	if width < 1 {
+		return 0
+	}
+	span := thumbnailWide * cellTall
+	return (width*thumbnailTall + span - 1) / span
+}
+
+// WidthFor is the other direction: the width to draw a thumbnail at so that it
+// takes up rows lines.
+//
+// It rounds down, the opposite way, so the two are inverses of each other and the
+// art never comes out taller than the room it was given.
+func WidthFor(rows int) int {
+	if rows < 1 {
+		return 0
+	}
+	return rows * thumbnailWide * cellTall / thumbnailTall
+}
+
+// Trim takes a flat black border off a picture and crops what is left to the
+// shape of a video thumbnail, keeping the middle.
+//
+// The border is the reason this exists at all. hqdefault is a 4:3 frame holding
+// a 16:9 picture with black bars above and below, and measured on an ordinary
+// video its top and bottom tenth are pure black, so a fifth of the cover is a
+// bar and the real picture is squeezed into the middle. Drawn like that it is
+// hard to make out what the picture is at all.
+//
+// What is left after the bars are off is cropped to 16:9 rather than to a
+// square, because that is the shape of the picture and squashing it to a square
+// throws away a third of it. A picture with no bars is only cropped to 16:9.
+func Trim(img image.Image) image.Image {
+	b := img.Bounds()
+	if b.Dx() < 1 || b.Dy() < 1 {
+		return img
+	}
+
+	top, bottom := trimFlatRows(img, b)
+
+	// the widest 16:9 picture that fits between the bars
+	height := bottom - top
+	if height < 1 {
+		return img
+	}
+	width := height * thumbnailWide / thumbnailTall
+	if width > b.Dx() {
+		// the picture is taller than 16:9, so the width is the limit and the
+		// height comes off instead
+		width = b.Dx()
+		height = width * thumbnailTall / thumbnailWide
+	}
+	if width < 1 || height < 1 {
+		return img
+	}
+
+	// and the middle of it
+	left := b.Min.X + (b.Dx()-width)/2
+	y := b.Min.Y + top + (bottom-top-height)/2
+
+	out := image.NewRGBA(image.Rect(0, 0, width, height))
+	draw.Draw(out, out.Bounds(), img, image.Point{X: left, Y: y}, draw.Src)
+	return out
+}
+
+// trimFlatRows finds the first and last rows that are not a flat black bar, and
+// returns them as offsets from the top of the bounds.
+//
+// A row counts as a bar when every pixel in it is darker than barDark. It is not
+// a question of how many dark pixels a row has: a bar has some very dark pixels
+// and nothing else, while a dark row of the picture itself has dark pixels and
+// slightly less dark ones, and only the first is worth throwing away.
+func trimFlatRows(img image.Image, b image.Rectangle) (top, bottom int) {
+	// bars are not perfectly black once they have been through a video encoder,
+	// so the test is not "is it zero" but "is every pixel in this row this dark"
+	dark := uint32(barDark) * 0x101
+
+	isBar := func(y int) bool {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if _, g, _, _ := img.At(x, y).RGBA(); g > dark {
+				return false
+			}
+		}
+		return true
+	}
+
+	for top < b.Dy() && isBar(b.Min.Y+top) {
+		top++
+	}
+
+	for bottom = b.Dy(); bottom > top && isBar(b.Min.Y+bottom-1); bottom-- {
+	}
+
+	// a picture that is nothing but bars has nothing left to keep
+	if top >= bottom {
+		return 0, b.Dy()
+	}
+
+	return top, bottom
+}
+
+// barDark is how dark a row has to be to count as a letterbox bar. It is not
+// zero, because a bar that has been through an encoder is a very dark grey
+// rather than true black, and a test of exactly zero would keep it.
+const barDark = 24
+
 // Render converts img and returns the result, one line per row, with a
 // trailing newline on each.
 func Render(img image.Image, opts Options) (string, error) {
@@ -170,6 +332,13 @@ func Render(img image.Image, opts Options) (string, error) {
 		return "", nil
 	}
 
+	// The crop happens before anything is measured, so every number below is
+	// worked out from the picture that is actually going to be drawn.
+	if opts.Trim {
+		img = Trim(img)
+		bounds = img.Bounds()
+	}
+
 	cols := opts.Width
 	if cols < 1 {
 		cols = DefaultWidth
@@ -178,30 +347,12 @@ func Render(img image.Image, opts Options) (string, error) {
 		cols = bounds.Dx()
 	}
 
-	// How many source pixels go into one output column. The grid below works in
-	// squares of this size, which is the whole of the resizing.
+	// Every mode lays out on one grid, and every cell holds more than one source
+	// pixel. How many is the mode's business, and it is worked out below.
 	//
-	// It rounds up rather than down so that cols of them span the entire width.
-	// Truncating instead drops the remainder off the right-hand edge, because
-	// cols*stepX then stops short of the last pixel: a 300px cover at 34 columns
-	// gives stepX 8 and covers 272px, so a tenth of the picture is never read.
-	// That squeezes the art horizontally, which is most of why it looked tall
-	// and narrow.
-	stepX := (bounds.Dx() + cols - 1) / cols
-	if stepX < 1 {
-		stepX = 1
-	}
-
-	// Both modes lay out on one grid. A HalfBlock cell splits its own height in
-	// two, so it covers twice the source height of a Mono cell and both land on
-	// the same number of rows: the grid carries two sub-rows per output row and
-	// each mode reads the half it needs. Stepping x and y by the same amount is
-	// what makes a HalfBlock cell square, since its two pixels are each half a
-	// cell tall and a cell is twice as tall as it is wide.
-	//
-	// The row count is worked out from the requested columns and the source's
-	// own shape rather than from stepX, so the answer survives being rounded. A
-	// terminal cell is about twice as tall as it is wide, so cols columns and
+	// The row count comes from the requested columns and the source's own shape,
+	// not from the size of a source block, so the answer survives being rounded.
+	// A terminal cell is about twice as tall as it is wide, so cols columns and
 	// rows rows are drawn cols wide by rows*2 tall; setting rows to half the
 	// columns times the source height over width makes that the source's aspect
 	// ratio exactly. A square picture comes out a square, which is what the
@@ -211,12 +362,35 @@ func Render(img image.Image, opts Options) (string, error) {
 		rows = 1
 	}
 
-	grid := sample(img, bounds, stepX, cols, rows)
+	// How many source pixels each mode squeezes into one cell, across and down.
+	// Mono and HalfBlock take one across, because a cell has one character in it
+	// and one colour; HalfBlock takes two down because a cell has a foreground
+	// and a background colour. Braille takes two across and four down, because a
+	// braille character is a two by four dot matrix.
+	//
+	// A braille cell is therefore square in source pixels, the same as a half
+	// block cell, which is why one block size suits every mode: the cell is
+	// twice as tall as it is wide on screen either way.
+	across, down := 1, 2
+	if opts.Mode == Braille {
+		across, down = 2, 4
+	}
+
+	grid := sample(img, bounds, cols*across, rows*down)
 
 	styles := newStyleCache(opts.Color)
 
-	if opts.Mode == HalfBlock {
+	switch opts.Mode {
+	case HalfBlock:
 		return renderBlocks(grid, rows, styles), nil
+	case Braille:
+		// the background the gaps between the dots are filled with, which is
+		// nothing at all unless the caller said what the art sits on
+		bg := uint32(noColor)
+		if opts.Background != nil {
+			bg = pack(opts.Background)
+		}
+		return renderBraille(grid, rows, styles, bg), nil
 	}
 
 	ramp, err := rampFor(opts)
@@ -226,17 +400,36 @@ func Render(img image.Image, opts Options) (string, error) {
 	return renderMono(grid, rows, ramp, styles), nil
 }
 
-// sample resamples img down to the grid the renderers walk, averaging each
-// block of source pixels into one cell.
+// sample resamples img down to a grid of cols by rows, averaging each block of
+// source pixels into one grid cell.
 //
 // Point sampling would be quicker, and it is what the original did, but a 3000px
-// cover dropped to 34 columns is reading one pixel in every 7700 and throwing
-// the rest away. On anything with detail in it that aliases into speckle rather
-// than a picture, which is the difference between a cover and a broken cover.
-func sample(img image.Image, bounds image.Rectangle, stepX, cols, rows int) *image.RGBA {
-	grid := image.NewRGBA(image.Rect(0, 0, cols, rows*2))
+// cover dropped to 34 columns is reading one pixel in every 7700 and throwing the
+// rest away. On anything with detail in it that aliases into speckle rather than
+// a picture, which is the difference between a cover and a broken cover.
+//
+// cols and rows are the size of the grid in source pixels, which is not the same
+// as the number of cells on screen: a cell holds more than one pixel, and how
+// many is the renderer's business.
+func sample(img image.Image, bounds image.Rectangle, cols, rows int) *image.RGBA {
+	grid := image.NewRGBA(image.Rect(0, 0, cols, rows))
 
-	for j := range rows * 2 {
+	// How many source pixels go into one grid cell, rounded up so that the grid
+	// spans the whole picture. Truncating instead drops the remainder off the
+	// right-hand edge, because cols*step then stops short of the last pixel: a
+	// 300px cover at 34 columns gives step 8 and covers 272px, so a tenth of the
+	// picture is never read. That squeezes the art horizontally, which is most of
+	// why it looked tall and narrow.
+	//
+	// The same number is used across and down, so each cell covers a square of
+	// the source. The caller picks cols and rows so that those squares come out
+	// in the right proportion for the cell shape.
+	step := (bounds.Dx() + cols - 1) / cols
+	if step < 1 {
+		step = 1
+	}
+
+	for j := range rows {
 		for i := range cols {
 			// The last block of a row or column usually runs off the edge. It is
 			// pulled back onto the last real pixel rather than left empty,
@@ -244,10 +437,10 @@ func sample(img image.Image, bounds image.Rectangle, stepX, cols, rows int) *ima
 			// transparent black, painting a false dark line along the bottom and
 			// the right.
 			block := image.Rect(
-				clamp(bounds.Min.X+i*stepX, bounds.Min.X, bounds.Max.X-1),
-				clamp(bounds.Min.Y+j*stepX, bounds.Min.Y, bounds.Max.Y-1),
-				min(bounds.Min.X+i*stepX+stepX, bounds.Max.X),
-				min(bounds.Min.Y+j*stepX+stepX, bounds.Max.Y),
+				clamp(bounds.Min.X+i*step, bounds.Min.X, bounds.Max.X-1),
+				clamp(bounds.Min.Y+j*step, bounds.Min.Y, bounds.Max.Y-1),
+				min(bounds.Min.X+i*step+step, bounds.Max.X),
+				min(bounds.Min.Y+j*step+step, bounds.Max.Y),
 			)
 			grid.SetRGBA(i, j, blockAverage(img, block))
 		}
@@ -352,6 +545,108 @@ func renderBlocks(grid *image.RGBA, rows int, styles *styleCache) string {
 
 	return b.String()
 }
+
+// renderBraille draws the picture with braille characters.
+//
+// A braille character is a two by four grid of dots, so each one carries eight
+// source pixels instead of the two a half block carries. That is four times the
+// detail in the same space, and it is still ordinary text, so a redraw cannot
+// lose it the way a sixel or iTerm2 image is lost.
+//
+// Each dot is either on or off, so brightness decides which, and the colour of
+// the cell is the average of the eight pixels in it. The result is a tinted
+// stipple rather than true colour, and on a photograph it carries far more of
+// the picture than a half block does.
+func renderBraille(grid *image.RGBA, rows int, styles *styleCache, bg uint32) string {
+	cols := grid.Bounds().Dx() / 2
+	var b strings.Builder
+
+	for row := range rows {
+		// where this row's four lines of dots start in the grid
+		top := row * 4
+
+		for col := range cols {
+			// the eight pixels of this cell, averaged for the colour and each
+			// read separately for the dots
+			fg := brailleCell(grid, col*2, top, styles.on)
+
+			if styles.on {
+				b.WriteString(styles.cell(pack(fg), bg).Render(string(brailleRune(grid, col*2, top))))
+				continue
+			}
+			b.WriteRune(brailleRune(grid, col*2, top))
+		}
+
+		b.WriteByte('\n')
+	}
+
+	return b.String()
+}
+
+// brailleCell is the average colour of the eight pixels in one braille cell, or
+// nil when colour is off and the caller does not need it.
+func brailleCell(grid *image.RGBA, left, top int, want bool) color.RGBA {
+	if !want {
+		return color.RGBA{}
+	}
+
+	// the cell is two pixels across and four down
+	var r, g, bl uint64
+	for dy := range 4 {
+		for dx := range 2 {
+			c := grid.RGBAAt(left+dx, top+dy)
+			r += uint64(c.R)
+			g += uint64(c.G)
+			bl += uint64(c.B)
+		}
+	}
+
+	return color.RGBA{R: uint8(r / 8), G: uint8(g / 8), B: uint8(bl / 8), A: 255}
+}
+
+// brailleRune builds the one braille character for a cell.
+//
+// The dots are numbered the way Unicode numbers them, which is not row by row
+// across: the left column is dots 1, 2, 3 and 7 from the top, and the right
+// column is 4, 5, 6 and 8. Each dot is a bit in the character, and the character
+// itself starts at U+2800, so a cell with every dot on is U+28FF.
+//
+// A dot is on when its pixel is brighter than the average of the whole cell.
+// That is what turns a smooth picture into a stipple: the bright parts of each
+// cell get dots and the dark parts do not.
+func brailleRune(grid *image.RGBA, left, top int) rune {
+	// the brightness the cell is judged against
+	var total float64
+	for dy := range 4 {
+		for dx := range 2 {
+			total += intensity(grid.RGBAAt(left+dx, top+dy))
+		}
+	}
+	average := total / 8
+
+	// the bit for each dot, in the order the dots are numbered. Read as a grid it
+	// is 1 4 / 2 5 / 3 6 / 7 8.
+	bits := [...][2]int{
+		{0, 0x01}, {1, 0x08},
+		{2, 0x02}, {3, 0x10},
+		{4, 0x04}, {5, 0x20},
+		{6, 0x40}, {7, 0x80},
+	}
+
+	dots := 0
+	for _, bit := range bits {
+		dx, dy := bit[0]%2, bit[0]/2
+		if intensity(grid.RGBAAt(left+dx, top+dy)) >= average {
+			dots |= bit[1]
+		}
+	}
+
+	return brailleBase + rune(dots)
+}
+
+// brailleBase is the first braille character, the one with no dots raised. Every
+// other braille character in the block is this plus a bit pattern.
+const brailleBase = 0x2800
 
 // blockGlyph picks a block for two grey values. With no colour there is nothing
 // to tell the halves apart, so both lit halves collapse into a full block and
