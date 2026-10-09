@@ -31,18 +31,14 @@ func songDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// TestLogSongSurvivesABrokenDatabase is the fix for the worst bug this program
-// had.
+// logSong ended the process on a database error. It was called from the tick, ten
+// times a second, mid-track, so a disk filling up or a momentary lock took the
+// whole interface down with no message on screen. It is now logged and shrugged off
+// like every other database error here.
 //
-// logSong ended the process on a database error. It was called from the tick,
-// ten times a second, in the middle of a track, so a disk filling up or a
-// momentary lock took the whole interface down with no message on screen. Every
-// other database error in the code is logged and shrugged off, and this is now
-// the same.
-//
-// A closed database is the stand-in for every way a write can fail, and it is
-// the strongest version of one: it will never recover on its own, so a function
-// that still calls os.Exit on it is plainly going to.
+// A closed database stands in for every way a write can fail, and is the strongest
+// version of one: it never recovers on its own, so a function that still calls
+// os.Exit on it is plainly going to.
 func TestLogSongSurvivesABrokenDatabase(t *testing.T) {
 	db := songDB(t)
 	db.Close() // every write from here fails
@@ -55,8 +51,8 @@ func TestLogSongSurvivesABrokenDatabase(t *testing.T) {
 	t.Log("logSong returned rather than ending the process")
 }
 
-// TestLogSongStillRecords makes sure the fix above did not turn into "do
-// nothing at all", which would also survive a broken database.
+// The fix above did not turn into "do nothing at all", which would also survive a
+// broken database.
 func TestLogSongStillRecords(t *testing.T) {
 	db := songDB(t)
 
@@ -83,27 +79,24 @@ func TestLogSongStillRecords(t *testing.T) {
 	}
 }
 
-// TestThumbnailURLIsBuiltNotCached pins down that the cover image is a pattern
-// with the id in it, which is why there is no table behind it.
-//
-// It used to SELECT from a metadata table and INSERT the result, on the claim
-// that this saved a lookup. It saved nothing, because the url is derivable from
+// The cover image is a pattern with the id in it, which is why there is no table
+// behind it. It used to SELECT from a metadata table and INSERT the result, on the
+// claim that this saved a lookup: it saved nothing, since the url is derivable from
 // the id, and it cost a table on every install plus two queries per track.
 func TestThumbnailURLIsBuiltNotCached(t *testing.T) {
 	if got := thumbnailURL("dQw4w9WgXcQ"); got != "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg" {
 		t.Errorf("thumbnailURL = %q, want the standard i.ytimg.com address", got)
 	}
 
-	// a local file has no video id, and an empty string is how the caller is
-	// told to leave the placeholder image alone
+	// a local file has no video id, and empty is how the caller is told to leave
+	// the placeholder image alone
 	if got := thumbnailURL(""); got != "" {
 		t.Errorf("thumbnailURL(\"\") = %q, want empty", got)
 	}
 }
 
-// TestOpenDBCreatesNoStrayTables checks the metadata table really is gone and
-// not just unused. An unused table would be harmless, but it would also still
-// be created on every fresh install for no reason.
+// The metadata table really is gone, not just unused. Unused would be harmless, but
+// it would still be created on every fresh install for no reason.
 func TestOpenDBCreatesNoStrayTables(t *testing.T) {
 	db := songDB(t)
 

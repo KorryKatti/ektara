@@ -5,13 +5,12 @@ import (
 	"time"
 )
 
-// fakeClock is a clock the test moves by hand and a sleep that only records
-// what it was asked to wait for. A limiter test should not take real time to
-// run, and this is what makes that possible.
+// A clock the test moves by hand, and a sleep that only records what it was asked
+// to wait for, so a limiter test does not take real time to run.
 //
-// l.now and l.sleep are given f.Now and f.Sleep, which are method values and so
-// keep working after the test moves the clock. A plain closure over a variable
-// the test also reassigns would quietly stop being what l.now points at.
+// l.now and l.sleep are given f.Now and f.Sleep, which are method values and so keep
+// working after the test moves the clock. A plain closure over a variable the test
+// also reassigns would quietly stop being what l.now points at.
 type fakeClock struct {
 	now   time.Time
 	slept time.Duration

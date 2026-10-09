@@ -7,13 +7,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// TestArtIsDroppedForTheWrongTrack checks a cover that turned up late is not
-// shown against the wrong song.
-//
-// The cover is fetched over the network, so by the time it lands the user may
-// have pressed d, or the window may have been resized. Either way the drawing is
-// for something that is no longer on the screen, and showing it would put one
-// song's picture next to another song's name.
+// A cover that turned up late is not shown against the wrong song. It is fetched
+// over the network, so by the time it lands the user may have pressed d or resized
+// the window, and showing it would put one song's picture next to another's name.
 func TestArtIsDroppedForTheWrongTrack(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.width, m.height = 100, 30
@@ -47,9 +43,8 @@ func TestArtIsDroppedForTheWrongTrack(t *testing.T) {
 	}
 }
 
-// TestArtIsRefetchedOnResize checks a new window size throws the old drawing
-// away and asks for a new one, rather than showing a picture drawn for the old
-// size or never asking at all.
+// A new window size throws the old drawing away and asks for a new one, rather
+// than showing a picture drawn for the old size or never asking at all.
 func TestArtIsRefetchedOnResize(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.mode = modePlaying
@@ -72,9 +67,8 @@ func TestArtIsRefetchedOnResize(t *testing.T) {
 	}
 }
 
-// TestArtIsNotAskedForPointlessly checks the fetch is skipped when it cannot
-// possibly be used: a local mp3 has no thumbnail, and a screen with no room has
-// nowhere to put a picture. Asking anyway would be a download for nothing.
+// The fetch is skipped when it cannot possibly be used: a local mp3 has no
+// thumbnail and a screen with no room has nowhere to put a picture.
 func TestArtIsNotAskedForPointlessly(t *testing.T) {
 	// a local file has no video id, so there is no thumbnail address
 	m := initialModel(nil, nil)
@@ -98,12 +92,9 @@ func TestArtIsNotAskedForPointlessly(t *testing.T) {
 	}
 }
 
-// TestArtIsFetchedOnlyOnce checks a drawing that already exists is not fetched
-// again.
-//
-// The screen is drawn ten times a second and the art is asked for on every one
-// of them, so without this the same thumbnail would be downloaded over and over
-// for as long as the track played.
+// A drawing that already exists is not fetched again. The art is asked for on every
+// one of ten frames a second, so without this the same thumbnail is downloaded over
+// and over for as long as the track plays.
 func TestArtIsFetchedOnlyOnce(t *testing.T) {
 	// an empty cache, so this test does not depend on what ran before it
 	artCache.Lock()
@@ -131,19 +122,14 @@ func TestArtIsFetchedOnlyOnce(t *testing.T) {
 	}
 }
 
-// TestANoticeDoesNotMoveTheCover is the bug where pressing + for the volume made
-// the cover disappear.
-//
-// A notice used to be drawn at the bottom of the middle box, which made the box
-// two rows shorter, which changed the width the cover was drawn at, which meant
-// the cover on the model was the wrong shape and was thrown away. Nothing
-// refetched it, because a cover that needs refetching is only noticed when the
-// terminal resizes. So the cover stayed blank until the notice expired a second
-// later, and then came back on its own.
+// Pressing + for the volume used to make the cover disappear. A notice was drawn at
+// the bottom of the middle box, making the box two rows shorter, changing the width
+// the cover was drawn at, so the cover on the model was the wrong shape and was
+// thrown away. Nothing refetched it, so it stayed blank until the notice expired.
 //
 // The cover is now sized from the part of the screen that does not move, and a
-// notice is drawn in the player bar where it costs the box nothing. So neither
-// the width nor the key may change when a notice comes and goes.
+// notice goes in the player bar where it costs the box nothing, so neither the
+// width nor the key may change when a notice comes and goes.
 func TestANoticeDoesNotMoveTheCover(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.width, m.height = 100, 30
@@ -182,9 +168,8 @@ func TestANoticeDoesNotMoveTheCover(t *testing.T) {
 	}
 }
 
-// TestTheCoverSurvivesANotice checks the whole round trip on the real screen: a
-// notice is shown, it expires, and the cover is still the cover afterwards rather
-// than a blank space that never fills in.
+// The whole round trip on the real screen: a notice is shown, it expires, and the
+// cover is still the cover afterwards rather than a blank space that never fills in.
 func TestTheCoverSurvivesANotice(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.width, m.height = 100, 30

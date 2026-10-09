@@ -1,8 +1,8 @@
 package main
 
-// This file is the keys: every key press, and which screen it belongs to.
-// Nothing here draws or plays anything. A handler changes the model and returns
-// the command that should follow from it.
+// The keys: every key press, and which screen it belongs to. Nothing here draws
+// or plays anything. A handler changes the model and returns the command that
+// should follow from it.
 
 import (
 	"fmt"
@@ -12,15 +12,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// ---------------------------------------------------------------------------
-// keys
-// ---------------------------------------------------------------------------
-
-// onKey is the front door for keys. It handles ctrl+c for every screen and then
-// passes the rest to whichever screen is showing.
+// The front door for keys: ctrl+c for every screen, then the rest to whichever
+// screen is showing.
 func (m model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// ctrl+c always quits. It has to, because a key that only quits from one
-	// screen would trap the user on any other.
+	// ctrl+c always quits, because a key that only quits from one screen would
+	// trap the user on any other.
 	if msg.String() == "ctrl+c" {
 		return m.quit()
 	}
@@ -54,8 +50,8 @@ func (m model) onMenuKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.menuCursor++
 		}
 
-	// typing the number jumps straight to that row, so "3" is a shortcut for
-	// moving down twice and pressing enter
+	// Typing the number jumps straight to that row, so "3" is a shortcut for
+	// moving down twice and pressing enter.
 	case "1", "2", "3", "4", "5":
 		m.menuCursor = int(msg.String()[0] - '1')
 		return m.startMenuChoice()
@@ -67,16 +63,16 @@ func (m model) onMenuKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// startMenuChoice acts on whichever menu row the cursor is on.
+// Acts on whichever menu row the cursor is on.
 func (m model) startMenuChoice() (tea.Model, tea.Cmd) {
 	switch m.menuCursor {
 
 	case menuQuit:
 		return m.quit()
 
-	// "Online" and "Stream" both start by asking for a name to look up.
-	// Which one it was is remembered, because picking a result has to know
-	// whether to save it or stream it.
+	// "Online" and "Stream" both start by asking for a name to look up. Which one
+	// it was is remembered, because picking a result has to know whether to save
+	// it or stream it.
 	case menuOnline, menuStream:
 		m.mode = modeSearch
 		m.searchInput = ""
@@ -84,22 +80,21 @@ func (m model) startMenuChoice() (tea.Model, tea.Cmd) {
 		m.searchWasStream = m.menuCursor == menuStream
 		return m, nil
 
-	// "Queue" uses the same typing screen, but for a number
+	// "Queue" uses the same typing screen, but for a number.
 	case menuQueue:
 		m.mode = modeSearch
 		m.searchInput = ""
 		m.askingCount = true
 		return m, nil
 
-	// the mp3s in this folder
 	case menuOffline:
 		tracks, err := localFiles()
 		if err != nil {
-			m.say("Could not list this folder: " + err.Error())
+			m.say("Could not list your library: " + err.Error())
 			return m, nil
 		}
 		if len(tracks) == 0 {
-			m.say("No mp3 files in this folder.")
+			m.say("No mp3 files in your library.")
 			return m, nil
 		}
 		m.mode = modeFiles
@@ -107,7 +102,6 @@ func (m model) startMenuChoice() (tea.Model, tea.Cmd) {
 		m.itemCursor = 0
 		return m, nil
 
-	// the history
 	case menuHistory:
 		tracks, err := historyTracks(m.db)
 		if err != nil {
@@ -130,29 +124,28 @@ func (m model) startMenuChoice() (tea.Model, tea.Cmd) {
 func (m model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		// leaving while a search is out cancels its result: onSearched only
-		// acts when searching is still true, so a late answer cannot yank the
-		// user back to a screen they walked away from
+		// Leaving while a search is out cancels its result: onSearched only acts
+		// when searching is still true, so a late answer cannot yank the user back
+		// to a screen they walked away from.
 		m.searching = false
 		m.mode = modeMenu
 		return m, nil
 
 	case "enter":
-		// one search at a time. A second enter while the first is still out
-		// would start a duplicate request.
+		// One search at a time: a second enter while the first is out would start
+		// a duplicate request.
 		if m.searching {
 			return m, nil
 		}
-		// the queue screen wants a number, not a name
 		if m.askingCount {
 			return m.startQueue()
 		}
 		if strings.TrimSpace(m.searchInput) == "" {
 			return m, nil
 		}
-		// searching takes a network round trip, so it happens in the
-		// background and the results arrive as a message. searching is set so
-		// the screen shows an animation instead of looking stuck.
+		// Searching takes a network round trip, so it happens in the background.
+		// searching is set so the screen shows an animation instead of looking
+		// stuck.
 		m.searching = true
 		return m, searchCmd(m.db, m.searchInput)
 
@@ -163,17 +156,16 @@ func (m model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// anything else that is a plain character gets typed into the box. Typing
-	// is ignored while searching, because the box is no longer the focus.
+	// Anything else that is a plain character gets typed into the box, which is
+	// ignored while searching because the box is no longer the focus.
 	if !m.searching && len(msg.Key().Text) > 0 {
 		m.searchInput += msg.Key().Text
 	}
 	return m, nil
 }
 
-// startQueue reads the number that was typed and starts collecting that many
-// tracks. A queue of one is the same as no queue at all, so it is not treated
-// as one.
+// Reads the number that was typed and starts collecting that many tracks. A
+// queue of one is the same as no queue at all, so it is not treated as one.
 func (m model) startQueue() (tea.Model, tea.Cmd) {
 	n := 0
 	if _, err := fmt.Sscanf(strings.TrimSpace(m.searchInput), "%d", &n); err != nil || n < 1 {
@@ -183,7 +175,6 @@ func (m model) startQueue() (tea.Model, tea.Cmd) {
 	}
 
 	if n == 1 {
-		// no queue to build, just go back to the menu for the one pick
 		m.queueWanted = 0
 		m.mode = modeMenu
 		return m, nil
@@ -219,15 +210,15 @@ func (m model) onListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		picked := m.items[m.itemCursor]
 
-		// a search result has to be saved to disk before it can play, so
-		// picking one starts the download and plays it when it lands
+		// A search result has to be saved to disk before it can play, so picking
+		// one starts the download and plays it when it lands.
 		if picked.needsDownload {
 			m.say("Downloading...")
 			return m, downloadCmd(picked.track.ID, picked.track.Title)
 		}
 
-		// still collecting tracks for a queue: add this one, and if it was the
-		// last one asked for, play what has been collected
+		// Still collecting for a queue: add this one, and if it was the last asked
+		// for, play what has been collected.
 		if m.queueWanted > 0 {
 			m.queue = append(m.queue, picked.track)
 			m.queueWanted--
@@ -245,8 +236,8 @@ func (m model) onListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// while a track is starting, the only key that does anything is one that
-	// gives up and goes back, so a broken track cannot trap the user here
+	// While a track is starting, the only key that does anything is one that gives
+	// up and goes back, so a broken track cannot trap the user here.
 	if m.loading {
 		if msg.String() == "esc" {
 			return m.backToMenu()
@@ -261,8 +252,8 @@ func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.player != nil {
 				m.player.Play()
 			}
-			// Discord gets the original start time again, so the time it
-			// counts matches what has actually been heard
+			// Discord gets the original start time again, so the time it counts
+			// matches what has actually been heard.
 			return m, m.presence.showCmd(m.track, m.startTime)
 		}
 		m.paused = true
@@ -271,12 +262,12 @@ func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.presence.hideCmd()
 
-	// The left and right arrows seek, which is what a play/pause bar with a
-	// progress line in it makes you expect. h and l still work, because they
-	// were here first and there is no reason to take them away.
+	// The arrows seek, which is what a play/pause bar with a progress line in it
+	// makes you expect. h and l still work: they were here first and there is no
+	// reason to take them away.
 	//
-	// Up and down are not bound here: this screen has no list to move a cursor
-	// through, so they would be two keys that do nothing.
+	// Up and down are unbound here because this screen has no list to move a
+	// cursor through, so they would be two keys that do nothing.
 	case "left", "h":
 		return m.seek(-5 * time.Second)
 	case "right", "l":
@@ -315,7 +306,7 @@ func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// = as well as +, because + needs shift and terminals disagree about what
-	// shift and equals sends
+	// shift and equals sends.
 	case "+", "=":
 		m.volume = clampVolume(m.volume + 0.05)
 		if m.player != nil {
@@ -338,9 +329,9 @@ func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// soundVolume is what to actually hand the player: zero while muted, otherwise
-// the volume. The volume number stays where it was while muted, which is what
-// makes unmuting give back the level that was set rather than silence.
+// What to hand the player: zero while muted, otherwise the volume. The volume
+// number stays where it was while muted, which is what makes unmuting give back
+// the level that was set rather than silence.
 func (m model) soundVolume() float64 {
 	if m.muted {
 		return 0

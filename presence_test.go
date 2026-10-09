@@ -11,10 +11,8 @@ import (
 	"github.com/hugolgst/rich-go/client"
 )
 
-// TestDiscordActivityCarriesTheTrack checks the status that gets built, which is
-// the half of this that was already working and must not have been disturbed by
-// the reconnecting: the song, the cover, the link back to YouTube, and the time
-// playback started.
+// The status that gets built, which must not be disturbed by the reconnecting:
+// the song, the cover, the link back to YouTube, and the time playback started.
 func TestDiscordActivityCarriesTheTrack(t *testing.T) {
 	start := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	a := discordActivity{
@@ -48,9 +46,8 @@ func TestDiscordActivityCarriesTheTrack(t *testing.T) {
 	}
 }
 
-// TestDiscordActivityWithoutAnID checks a local file, which has no video id and
-// so no cover and no link. Asking for a thumbnail built from an empty id would
-// otherwise put a broken image in front of every local track.
+// A local file: no video id, so no cover and no link. A thumbnail built from an
+// empty id would otherwise put a broken image in front of every local track.
 func TestDiscordActivityWithoutAnID(t *testing.T) {
 	got := discordActivity{playing: true, track: Track{Title: "A Local Song"}}.activity()
 
@@ -62,9 +59,8 @@ func TestDiscordActivityWithoutAnID(t *testing.T) {
 	}
 }
 
-// TestDiscordIdleActivity checks the status shown when nothing is playing. It
-// has to be safe to send at any time, including before the first track, because
-// that is when the program sends it.
+// The status when nothing is playing, which has to be safe to send at any time,
+// including before the first track, because that is when the program sends it.
 func TestDiscordIdleActivity(t *testing.T) {
 	got := discordActivity{}.activity()
 
@@ -79,11 +75,9 @@ func TestDiscordIdleActivity(t *testing.T) {
 	}
 }
 
-// TestPresenceRetryOnlyWhenItIsDue is the test that matters most here, because
-// it pins the reason the retry is asked for rather than simply retried
-// constantly. A presence that tried to reconnect on every tick would dial
-// Discord ten times a second for the rest of the session, which is a bug that
-// looks like nothing at all.
+// The test that matters most here: it pins why the retry is asked for. A presence
+// reconnecting on every tick would dial Discord ten times a second for the rest of
+// the session, a bug that looks like nothing at all.
 func TestPresenceRetryOnlyWhenItIsDue(t *testing.T) {
 	soon := time.Now().Add(presenceRetryEvery)
 	past := time.Now().Add(-time.Minute)
@@ -129,9 +123,8 @@ func TestPresenceRetryOnlyWhenItIsDue(t *testing.T) {
 	}
 }
 
-// TestPresenceSetRemembersWhatToShow covers the other half of the fix. The
-// status is held rather than fired and forgotten, so that a connection made
-// later can show the song that is playing now instead of nothing at all.
+// The other half of the fix: the status is held rather than fired and forgotten,
+// so a connection made later shows the song playing now instead of nothing.
 func TestPresenceSetRemembersWhatToShow(t *testing.T) {
 	p := newPresence(discordAppID)
 	want := Track{ID: "abc12345678", Title: "Something"}
@@ -155,10 +148,9 @@ func TestPresenceSetRemembersWhatToShow(t *testing.T) {
 	}
 }
 
-// TestTickWithoutAPresenceDoesNotStopTheClock guards the other half of putting
-// the retry in Update. A model assembled by hand rather than by initialModel has
-// no presence, and the clock runs whether or not anything is playing, so a
-// missing presence has to be survivable rather than a panic on the first tick.
+// Guards putting the retry in Update: a model assembled by hand has no presence,
+// and the clock runs whether or not anything is playing, so a missing presence
+// must be survivable rather than a panic on the first tick.
 func TestTickWithoutAPresenceDoesNotStopTheClock(t *testing.T) {
 	m := model{} // deliberately no presence, as a hand-built model has
 
@@ -174,14 +166,12 @@ func TestTickWithoutAPresenceDoesNotStopTheClock(t *testing.T) {
 	}
 }
 
-// fakeDiscord is a Discord that can be made to be in any state a test needs:
-// not there at all, there but the socket died, or working.
-//
-// It exists because the paths worth testing here are the ones where something
-// is missing or broken, and no amount of asking a real Discord will produce
-// those on demand. It also keeps the tests from talking to the Discord on
-// whatever machine they run on, which would make them mean different things in
-// different places.
+// A Discord that can be made to be in any state a test needs: not there at all,
+// there but the socket died, or working. The paths worth testing are the ones
+// where something is missing or broken, which no amount of asking a real Discord
+// will produce on demand. It also keeps the tests off whatever Discord happens to
+// be on the machine, which would make them mean different things in different
+// places.
 type fakeDiscord struct {
 	// loginErr is what the handshake answers. A non-nil error means Discord is
 	// not there.
@@ -219,17 +209,15 @@ func (f *fakeDiscord) send(a client.Activity) error {
 	return f.sendErr
 }
 
-// presenceWith makes a presence backed by a fake, so the test controls what
-// Discord does.
+// A presence backed by a fake, so the test controls what Discord does.
 func presenceWith(d discord) *presence {
 	return &presence{d: d, appID: "test-app"}
 }
 
-// TestPresenceRetriesUntilDiscordAppears is the fix itself. A Discord that is
-// not running when the first status is set has to be tried again later, and
-// once it answers, the status that was being asked for has to be the one that
-// goes up. Before, one failed handshake left the status dead for the rest of
-// the run with nothing to say so.
+// The fix itself: a Discord not running when the first status is set has to be
+// tried again later, and once it answers the status being asked for has to be the
+// one that goes up. Before, one failed handshake left the status dead for the rest
+// of the run with nothing to say so.
 func TestPresenceRetriesUntilDiscordAppears(t *testing.T) {
 	d := &fakeDiscord{loginErr: errNoDiscord}
 	p := presenceWith(d)
@@ -279,10 +267,9 @@ func TestPresenceRetriesUntilDiscordAppears(t *testing.T) {
 	}
 }
 
-// TestPresenceLoggedOutBeforeEveryLogin checks the handshake is really asked
-// for each time. The library skips it when it believes it is already logged in,
-// so a reconnect after a restart would report success while doing nothing, and
-// the status would be written into a socket nobody was reading.
+// The handshake is really asked for each time: the library skips it when it
+// believes it is already logged in, so a reconnect after a restart would report
+// success while doing nothing, writing the status into a socket nobody reads.
 func TestPresenceLoggedOutBeforeEveryLogin(t *testing.T) {
 	d := &fakeDiscord{loginErr: errNoDiscord}
 	p := presenceWith(d)
@@ -302,10 +289,9 @@ func TestPresenceLoggedOutBeforeEveryLogin(t *testing.T) {
 	}
 }
 
-// TestPresenceNoticesDiscordDiedMidSong is the second way the status used to be
-// lost, and the one that put the library's error message onto the terminal this
-// program draws in. The connection believes it is fine and the socket is not,
-// which is only tellable apart by going and looking.
+// The second way the status used to be lost, and the one that put the library's
+// error message onto the terminal this program draws in. The connection believes
+// it is fine and the socket is not, only tellable apart by going and looking.
 func TestPresenceNoticesDiscordDiedMidSong(t *testing.T) {
 	d := &fakeDiscord{listening: true}
 	p := presenceWith(d)
@@ -342,9 +328,9 @@ func TestPresenceNoticesDiscordDiedMidSong(t *testing.T) {
 	}
 }
 
-// TestPresenceLogsAnOutageOnce checks that a Discord which is not running writes
-// to the log when it is first noticed and then stops, rather than repeating
-// itself every ten seconds for as long as the program is open.
+// A Discord which is not running logs once when first noticed and then stops,
+// rather than repeating itself every ten seconds for as long as the program is
+// open.
 func TestPresenceLogsAnOutageOnce(t *testing.T) {
 	var buf bytes.Buffer
 	prev := log.Writer()
@@ -368,9 +354,8 @@ func TestPresenceLogsAnOutageOnce(t *testing.T) {
 	}
 }
 
-// TestPresenceConnectedSendsNothingMore checks that a working Discord is left
-// alone. The retry exists for the broken case, and a reconnect loop against a
-// healthy Discord would be its own bug.
+// A working Discord is left alone: the retry exists for the broken case, and a
+// reconnect loop against a healthy Discord would be its own bug.
 func TestPresenceConnectedSendsNothingMore(t *testing.T) {
 	d := &fakeDiscord{listening: true}
 	p := presenceWith(d)

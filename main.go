@@ -1,8 +1,8 @@
 package main
 
-// This file is the entry point: set up the log, open the library, create the
-// one player, and hand the model to Bubble Tea. The interface itself is in
-// model.go, keys.go, queue.go, cmds.go and draw.go.
+// Entry point: set up the log, open the library, create the one player, hand the
+// model to Bubble Tea. The interface is in model.go, keys.go, queue.go, cmds.go
+// and draw.go.
 
 import (
 	"fmt"
@@ -14,25 +14,16 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// discordAppID is this program's Discord application.
 const discordAppID = "1553038133006704670"
 
-// redrawEvery is how often the player looks at the audio and redraws. Ten times
-// a second is fast enough for a progress bar to look smooth and slow enough to
-// cost nothing.
+// Fast enough for a smooth progress bar, slow enough to cost nothing.
 const redrawEvery = 100 * time.Millisecond
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
-
 func main() {
-	// The interface owns the terminal, so nothing may write a log line to it. A
-	// log goes to stderr, which is the same screen, and the line lands in the
-	// middle of the drawing and stays there until the next full redraw. The log
-	// therefore goes to a file in the state directory. If that file cannot be
-	// opened the log is thrown away instead: a missing log is a nuisance, but a
-	// garbled screen is a bug.
+	// The interface owns the terminal, so nothing may write a log line to it: a
+	// line lands in the middle of the drawing and stays until the next redraw.
+	// A missing log is a nuisance, a garbled screen is a bug, so if the file
+	// cannot be opened the log is thrown away instead.
 	if path, err := logPath(); err == nil {
 		if lf, err := tea.LogToFile(path, ""); err == nil {
 			defer lf.Close()
@@ -50,11 +41,10 @@ func main() {
 	}
 	defer db.Close()
 
-	// The player is created once, before the interface starts, because it opens
-	// the audio device and there is no point paying for that if the program is
-	// about to be closed again, and none at all if the user never plays
-	// anything. A failure here is worth printing rather than logging, because
-	// nothing has been drawn yet and it is the only way the user finds out.
+	// Created before the interface starts: it opens the audio device, which is
+	// slow and pointless if we never play anything. Worth printing rather than
+	// logging, because nothing has been drawn yet and it is the only way the user
+	// finds out.
 	audio, err := newPlayer()
 	if err != nil {
 		fmt.Println("Could not open the audio player:", err)
@@ -62,12 +52,11 @@ func main() {
 	}
 	defer audio.Close()
 
-	// Discord is optional, and nothing about connecting to it happens here. The
-	// model owns that, because a connection has to be able to be retried for
-	// the whole run rather than attempted once and forgotten: a Discord that is
-	// not running yet, or that restarts mid-song, used to leave the status
-	// dead for the rest of the session without a word. Without Discord the
-	// player still works, so none of it is ever a reason to stop.
+	// Discord is optional and nothing connects here. The model owns it, because a
+	// connection has to be retried for the whole run rather than attempted once:
+	// a Discord that is not running yet, or that restarts mid-song, used to leave
+	// the status dead for the rest of the session without a word. Without Discord
+	// the player still works, so it is never a reason to stop.
 	p := tea.NewProgram(initialModel(db, audio))
 	if _, err := p.Run(); err != nil {
 		fmt.Println("Alas, there's been an error:", err)

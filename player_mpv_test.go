@@ -6,20 +6,19 @@ import (
 	"time"
 )
 
-// This plays a real file through the real player and the real sound device, so
-// it is the only test that can say the audio path works at all. It is skipped
-// when EKTARA_AUDIO_TESTS is unset, because a machine with no sound server
-// would otherwise fail it for a reason that has nothing to do with the code.
+// Plays a real file through the real player and the real sound device, so it is
+// the only test that can say the audio path works at all. Skipped when
+// EKTARA_AUDIO_TESTS is unset, because a machine with no sound server would
+// otherwise fail it for reasons that have nothing to do with the code.
 //
-// It is skipped, not made to pass quietly, on purpose: a test that is skipped
-// for everyone is a test nobody is running.
+// Skipped rather than made to pass quietly: a test skipped for everyone is a test
+// nobody is running.
 func audioTestEnabled() bool {
 	return os.Getenv("EKTARA_AUDIO_TESTS") != ""
 }
 
-// waitFor polls until condition holds or the deadline passes. mpv does its work
-// on its own threads, so everything here is waiting for a fact to become true
-// rather than commanding it to.
+// Polls until condition holds or the deadline passes: mpv works on its own threads,
+// so everything here waits for a fact to become true rather than commanding it.
 func waitFor(t *testing.T, what string, within time.Duration, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(within)

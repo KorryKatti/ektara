@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -16,12 +18,10 @@ import (
 	"ektara/asciiart"
 )
 
-// TestListWindow pins down the arithmetic that keeps a long list on screen.
-//
-// The history can run to hundreds of rows and the terminal is about thirty
-// lines, so the list has to show a slice around the cursor. The two things that
-// must always hold are that the slice fits inside the list, and that the cursor
-// is in it. Everything else is cosmetic.
+// The arithmetic that keeps a long list on screen: the history runs to hundreds
+// of rows and the terminal is about thirty lines, so the list shows a slice around
+// the cursor. The slice must fit inside the list and contain the cursor; the rest
+// is cosmetic.
 func TestListWindow(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -67,12 +67,8 @@ func TestListWindow(t *testing.T) {
 	}
 }
 
-// TestListRows checks the screen-height maths, including the sizes a terminal
-// can actually be shrunk to.
-//
-// The numbers come off the frame drawn at the top of draw.go: the height is
-// whatever the title and the six row player bar have not taken, less the box's own
-// padding and the seven lines the list spends on the heading and the key hint.
+// The screen-height maths, including the sizes a terminal can be shrunk to. The
+// numbers come off the frame drawn at the top of draw.go.
 func TestListRows(t *testing.T) {
 	cases := []struct {
 		height int
@@ -91,8 +87,7 @@ func TestListRows(t *testing.T) {
 	}
 }
 
-// TestSpinFrame checks the busy animation cycles and wraps, which is what stops
-// the counter running past the end of the list of frames.
+// The busy animation cycles and wraps, so the counter cannot run past the list.
 func TestSpinFrame(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 9; i++ {
@@ -107,9 +102,8 @@ func TestSpinFrame(t *testing.T) {
 	}
 }
 
-// TestDrawSearchShowsSearching is the fix for the screen that used to look
-// frozen: while a search is out the box has to say so, and once it is not there
-// the typing hint has to come back.
+// While a search is out the box has to say so, and once it is not the typing hint
+// has to come back: the screen used to look frozen.
 func TestDrawSearchShowsSearching(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.width, m.height = 80, 30
@@ -134,8 +128,8 @@ func TestDrawSearchShowsSearching(t *testing.T) {
 	}
 }
 
-// TestDrawItemsWindows checks that only a screenful of a long list is drawn,
-// and that the "showing x-y of n" line tells the user the rest is there.
+// Only a screenful of a long list is drawn, and the "showing x-y of n" line says
+// the rest is there.
 func TestDrawItemsWindows(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.width, m.height = 80, 30
@@ -164,14 +158,11 @@ func TestDrawItemsWindows(t *testing.T) {
 	}
 }
 
-// fakeAudio is a player that does not play anything, so the tick can be tested
-// at the one point that matters: the moment a track ends.
-//
-// It exists because that path could not be reached before. onTick asks whether
-// the player is still going, and the real player can only answer that by
-// actually playing something out of a sound device, so the test had no way in
-// and the end-of-a-track path went untested. That is how a bug survived in the
-// one place the test above claimed to cover.
+// A player that does not play anything, so the tick can be tested at the one point
+// that matters: the moment a track ends. That path could not be reached before,
+// because the real player can only answer "is it still going" by playing something
+// out of a sound device, which is how a bug survived in the one place the test above
+// claimed to cover.
 type fakeAudio struct {
 	playing bool
 	err     error
@@ -195,19 +186,14 @@ func (f *fakeAudio) Length() time.Duration    { return time.Duration(time.Minute
 func (f *fakeAudio) Stop()                    { f.stops++ }
 func (f *fakeAudio) Close()                   {}
 
-// TestOnTickAlwaysKeepsTheClockRunning checks the one rule the tick cannot
-// break: every path out of it has to hand back another tick.
+// The one rule the tick cannot break: every path out of it hands back another
+// tick. A path that does not stops the clock for good, nothing complains, and the
+// program just looks frozen. Only one clock is wanted, so startTrack and backToMenu
+// must not start their own.
 //
-// A path that returns a command without one stops the clock for good. Nothing
-// complains, the progress bar just quietly stops moving, and the program looks
-// frozen. Only one clock is wanted, so startTrack and backToMenu must not start
-// their own, which is what makes this the whole reason the rest of the function
-// matters.
-//
-// The end-of-a-track cases are the ones that matter most, and they are the ones
-// this test did not have for a long time: onTick does not return its own
-// command there, it returns move()'s, and move() has no tick in it. That froze
-// the display the first time any song ended, which was every time.
+// The end-of-a-track cases matter most and went untested for a long time: onTick
+// returns move()'s command there, and move() has no tick in it. That froze the
+// display the first time any song ended, which was every time.
 func TestOnTickAlwaysKeepsTheClockRunning(t *testing.T) {
 	queue := []Track{
 		{ID: "one", Title: "one"},
@@ -269,16 +255,13 @@ func TestOnTickAlwaysKeepsTheClockRunning(t *testing.T) {
 	}
 }
 
-// TestEndOfTrackKeepsTheClockRunning is the bug, pinned down.
+// The bug, pinned down: when a song ended, onTick returned move()'s command, which
+// opens the next track and has no tick in it, so nothing renewed the clock chain.
+// Ten seconds after the first song finished the progress bar stopped, the spinner
+// stopped, and the queue sat on the last track forever.
 //
-// When a song ended, onTick returned move()'s command, which opens the next
-// track and does not include a tick. Nothing renews the clock chain, so ten
-// seconds after the first song finished the progress bar stopped, the search
-// spinner stopped, and the queue sat on the last track forever.
-//
-// The only way to test this is to actually run the command onTick returned and
-// see whether it produces another tick, which is why there is a fake player at
-// all.
+// Only reachable by actually running the command onTick returned, which is why
+// there is a fake player at all.
 func TestEndOfTrackKeepsTheClockRunning(t *testing.T) {
 	queue := []Track{
 		{ID: "one", Title: "one"},
@@ -312,15 +295,13 @@ func TestEndOfTrackKeepsTheClockRunning(t *testing.T) {
 	}
 }
 
-// isTick says whether msg is a tick, looking one level into a batch if it has
-// to. A tick is allowed to be batched alongside the work a track change does,
-// so finding it among a batch's members counts as finding it.
+// Whether msg is a tick, looking one level into a batch: a tick is allowed to be
+// batched alongside the work a track change does, so finding it among a batch's
+// members counts.
 //
-// It deliberately does not recurse. Running a batch's own members would run
-// openTrackCmd and the Discord update for real, on every one of a few hundred
-// rounds, which turns a test about the clock into a test about the network. The
-// fix batches the tick directly into what onTick returns, so the tick is always
-// only one level down.
+// Deliberately does not recurse. Running a batch's own members would run openTrackCmd
+// and the Discord update for real on every one of a few hundred rounds, turning a
+// test about the clock into a test about the network.
 func isTick(msg tea.Msg) bool {
 	if _, ok := msg.(tickMsg); ok {
 		return true
@@ -340,8 +321,7 @@ func isTick(msg tea.Msg) bool {
 	return false
 }
 
-// TestEndOfTrackMovesTheQueueOn checks the other half: a finished track is not
-// just a clock problem, it is also the moment the queue is supposed to advance.
+// The other half: a finished track is also the moment the queue advances.
 func TestEndOfTrackMovesTheQueueOn(t *testing.T) {
 	queue := []Track{
 		{ID: "one", Title: "one", Stream: true, PageURL: "https://example.invalid/one"},
@@ -372,8 +352,8 @@ func TestEndOfTrackMovesTheQueueOn(t *testing.T) {
 	}
 }
 
-// TestEndOfLastTrackReturnsToTheMenu is the other end of the same queue: the
-// last song finishes and there is nothing after it, so the menu comes back.
+// The other end of the queue: the last song finishes, nothing is after it, so the
+// menu comes back.
 func TestEndOfLastTrackReturnsToTheMenu(t *testing.T) {
 	queue := []Track{{ID: "one", Title: "one"}}
 
@@ -397,12 +377,10 @@ func TestEndOfLastTrackReturnsToTheMenu(t *testing.T) {
 	}
 }
 
-// TestDrawMenuShowsTheLastFailure checks that a broken track leaves a reason
-// behind.
-//
-// The notice a failure used to raise was wiped by the move to the next track, so
-// the reason was never seen. lastError does not expire, so the queue can run out
-// and the menu can still say why the music stopped.
+// A broken track leaves a reason behind: the notice a failure used to raise was
+// wiped by the move to the next track, so the reason was never seen. lastError does
+// not expire, so the queue can run out and the menu can still say why the music
+// stopped.
 func TestDrawMenuShowsTheLastFailure(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.width, m.height = 80, 30
@@ -419,17 +397,13 @@ func TestDrawMenuShowsTheLastFailure(t *testing.T) {
 	}
 }
 
-// TestFrameFitsTheTerminal is the check that the new layout holds together.
+// That the layout holds together. The screen is built out of fixed height boxes
+// and lipgloss cuts a box off at the bottom rather than letting it grow, which is
+// what stops a long title or a big queue pushing the player bar off the screen. It
+// only works if every screen fits at every size, so this walks the sizes a terminal
+// can be, every screen, with the awkward state filled in.
 //
-// The screen is built out of fixed height boxes, and lipgloss cuts a box off at
-// the bottom rather than letting it grow. That is what stops a long track title
-// or a big queue from pushing the player bar off the screen. It only works if
-// every screen fits at every size, so this walks the sizes a terminal can
-// actually be, every screen, with the awkward state filled in: a long title, a
-// long error, a full queue, a long list with the cursor in the middle.
-//
-// The rule being checked is the only one that matters: the frame is never wider
-// or taller than the terminal it was told about.
+// The rule: the frame is never wider or taller than the terminal it was told about.
 func TestFrameFitsTheTerminal(t *testing.T) {
 	sizes := [][2]int{
 		{200, 50}, {120, 40}, {100, 30}, {80, 24}, {60, 20}, {40, 10}, {30, 8},
@@ -481,10 +455,9 @@ func TestFrameFitsTheTerminal(t *testing.T) {
 	}
 }
 
-// TestFrameShowsTheSamePartsEverywhere checks the frame really is one frame: the
-// title, the menu and the player bar are drawn the same way whatever the screen
-// is. A layout that changed shape as you moved between screens is what makes a
-// program feel like it is jumping about under you.
+// The frame really is one frame: title, menu and player bar drawn the same way
+// whatever the screen is. A layout that changed shape between screens is what
+// makes a program feel like it is jumping about under you.
 func TestFrameShowsTheSamePartsEverywhere(t *testing.T) {
 	modes := []mode{modeMenu, modeSearch, modeResults, modeFiles, modeHistory, modePlaying}
 
@@ -514,9 +487,8 @@ func TestFrameShowsTheSamePartsEverywhere(t *testing.T) {
 	}
 }
 
-// TestMenuNamesAreShortEnough guards the sidebar against the one thing that
-// would break it: a name too long for 24 columns would wrap onto a second line
-// and push the rest of the menu down.
+// The sidebar's one fragile point: a name too long for 24 columns wraps onto a
+// second line and pushes the rest of the menu down.
 func TestMenuNamesAreShortEnough(t *testing.T) {
 	// the sidebar is 24 wide and pads one column each side, so 22 are left
 	const room = sidebarWidth - 2
@@ -529,9 +501,8 @@ func TestMenuNamesAreShortEnough(t *testing.T) {
 	}
 }
 
-// TestMenuDescriptionsLineUp checks the two menu lists are the same length, since
-// one is indexed by the cursor into the other. A short descriptions list would
-// mean the last rows of the menu have nothing to say about themselves.
+// The two menu lists are the same length, since one is indexed by the cursor into
+// the other. A short descriptions list leaves the last rows with nothing to say.
 func TestMenuDescriptionsLineUp(t *testing.T) {
 	if len(menuItems) != len(menuDescriptions) {
 		t.Errorf("%d menu entries but %d descriptions", len(menuItems), len(menuDescriptions))
@@ -552,13 +523,10 @@ func TestMenuDescriptionsLineUp(t *testing.T) {
 	}
 }
 
-// TestErrorsAreAlwaysVisible checks the message the program most needs to say is
-// not the one it drops first.
-//
-// The middle box is cut off at the bottom to keep it the size of the terminal,
-// so whatever a screen drew last would be the first to go. The frame makes room
-// for the errors before the cutting instead, which is why they survive on a
-// screen that is completely full.
+// The message the program most needs to say is not the one it drops first. The
+// middle box is cut off at the bottom, so whatever a screen drew last would go
+// first; the frame makes room for the errors before the cutting, which is why they
+// survive on a completely full screen.
 func TestErrorsAreAlwaysVisible(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.width, m.height = 80, 24
@@ -586,8 +554,8 @@ func TestErrorsAreAlwaysVisible(t *testing.T) {
 	}
 }
 
-// stripped removes the colour codes, so a test can look for words rather than
-// for a whole styled line.
+// Removes the colour codes, so a test can look for words rather than a whole
+// styled line.
 func stripped(s string) string {
 	var b strings.Builder
 	inCode := false
@@ -604,10 +572,9 @@ func stripped(s string) string {
 	return b.String()
 }
 
-// TestNothingPrintedIsAWrap checks the player bar holds its shape. Its three
-// lines are a fixed height, so a long title or a long link that wrapped onto a
-// second line would push the bottom of the screen off the terminal. Every line
-// is clipped to the width instead.
+// The player bar holds its shape: its lines are a fixed height, so a long title or
+// link wrapping onto a second line would push the bottom of the screen off the
+// terminal. Every line is clipped to the width instead.
 func TestNothingPrintedIsAWrap(t *testing.T) {
 	for _, size := range [][2]int{{200, 50}, {100, 30}, {80, 24}, {60, 20}, {40, 10}} {
 		m := initialModel(nil, nil)
@@ -630,14 +597,9 @@ func TestNothingPrintedIsAWrap(t *testing.T) {
 	}
 }
 
-// TestGreetingDoesNotChange checks the first screen says the same thing every
-// time it is drawn.
-//
-// The screen is drawn ten times a second, and the greeting used to be worked out
-// while drawing, picking a random line each time. That made the text flicker too
-// fast to read, which is worse than not having one at all. It is picked once now,
-// when the model is built, so this draws the menu a hundred times and expects one
-// line every time.
+// The first screen says the same thing every time it is drawn. The greeting used to
+// be worked out while drawing, picking a random line each time, which made it
+// flicker too fast to read. It is picked once now, when the model is built.
 func TestGreetingDoesNotChange(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.width, m.height = 80, 24
@@ -655,12 +617,10 @@ func TestGreetingDoesNotChange(t *testing.T) {
 	}
 }
 
-// TestTimeMsgSuitsTheHour checks the greeting is not just any line. Each band of
-// the day has its own pool, and a line from the wrong band is as wrong as no
-// greeting at all: "it's high noon" at four in the morning.
-//
-// The greeting is a random pick, so each hour is asked a hundred times and every
-// single answer has to be one of that hour's own lines.
+// The greeting is not just any line: each band of the day has its own pool, and a
+// line from the wrong band is as wrong as no greeting at all. The greeting is a
+// random pick, so each hour is asked a hundred times and every answer has to be one
+// of that hour's own lines.
 func TestTimeMsgSuitsTheHour(t *testing.T) {
 	hours := []int{2, 7, 12, 15, 20, 23}
 
@@ -681,10 +641,9 @@ func TestTimeMsgSuitsTheHour(t *testing.T) {
 	}
 }
 
-// TestEachHourHasItsOwnPool checks the bands do not overlap. If two bands shared
-// a line then the test above would pass while the greeting was plainly wrong for
-// one of them, which is the sort of thing that looks fine until someone runs it at
-// the wrong time of day.
+// The bands do not overlap. If two shared a line the test above would pass while
+// the greeting was plainly wrong for one of them, which looks fine until someone
+// runs it at the wrong time of day.
 func TestEachHourHasItsOwnPool(t *testing.T) {
 	// the bands, and the hour that picks each one
 	hours := []int{2, 7, 12, 15, 20, 23}
@@ -701,14 +660,13 @@ func TestEachHourHasItsOwnPool(t *testing.T) {
 	}
 }
 
-// TestFrameFillsTheTerminalExactly checks the frame covers the whole screen: one
-// line fewer and the bottom row is never drawn, so the terminal's own background
-// shows through the player bar. That is the transparency you can see along the
-// bottom, and it is an off by one rather than anything to do with colour.
+// The frame covers the whole screen: one line fewer and the bottom row is never
+// drawn, so the terminal's own background shows through the player bar. That is an
+// off by one rather than anything to do with colour.
 //
-// lipgloss counts a border as part of a style's height, so the height of the
-// player bar and the height taken off the terminal for it have to be the same
-// number. When they were not, the frame was one line short at every size.
+// lipgloss counts a border as part of a style's height, so the bar's height and
+// the height taken off the terminal for it have to be the same number. When they
+// were not, the frame was one line short at every size.
 func TestFrameFillsTheTerminalExactly(t *testing.T) {
 	sizes := [][2]int{{200, 50}, {120, 40}, {100, 30}, {80, 24}, {60, 20}, {40, 10}}
 
@@ -729,18 +687,13 @@ func TestFrameFillsTheTerminalExactly(t *testing.T) {
 	}
 }
 
-// TestEveryRowHasABackground is the check for a transparent screen.
+// The check for a transparent screen. A cell with no background of its own shows
+// whatever the terminal's background is: a dark grey nobody notices on most
+// terminals, the desktop on a transparent one.
 //
-// The frame is a background colour with text on it, and a cell with no
-// background of its own is left showing whatever the terminal's background is. On
-// most terminals that is a dark grey nobody notices. On one with a transparent
-// background it is the desktop, and the screen gets bright bands across it where
-// the program forgot to say what colour a row is.
-//
-// The border along the bottom was the row doing this: it had a foreground colour
-// for the line and no background for the space around it, so the whole row came
-// through. Checking the width of every row cannot see this, because the row is
-// the right width. It has to be the colour that is checked.
+// The border along the bottom was the row doing this, with a foreground colour for
+// the line and no background around it. Checking the width of every row cannot see
+// it, because the row is the right width; it has to be the colour that is checked.
 func TestEveryRowHasABackground(t *testing.T) {
 	// a background colour, either as 24-bit rgb or as one of the sixteen
 	background := regexp.MustCompile(`(?:48;2;\d+;\d+;\d+|4[0-7];)`)
@@ -773,14 +726,10 @@ func TestEveryRowHasABackground(t *testing.T) {
 	}
 }
 
-// TestTheFrameHasThreeColumnsWhenThereIsRoom checks the menu and the queue are
-// both on screen together, and that they give way in the right order as the
-// terminal narrows.
-//
-// The menu goes first because it is the thing the user came to look at being
-// least: content is worth more than navigation, and content is worth more than a
-// queue. Below that only the content is left, which is better than three
-// unusable columns.
+// The menu and the queue are both on screen together, and give way in the right
+// order as the terminal narrows. The menu goes first because it is what the user
+// came to look at least: content is worth more than navigation, and more than a
+// queue. Below that only the content is left, which beats three unusable columns.
 func TestTheFrameHasThreeColumnsWhenThereIsRoom(t *testing.T) {
 	cases := []struct {
 		width          int
@@ -812,9 +761,9 @@ func TestTheFrameHasThreeColumnsWhenThereIsRoom(t *testing.T) {
 	}
 }
 
-// TestTheColumnsAddUpToTheTerminal is the arithmetic behind the frame. The three
-// columns have to add up to exactly the terminal width, or the right hand one
-// hangs off the side and the middle one is not where it looks.
+// The arithmetic behind the frame: the three columns have to add up to exactly the
+// terminal width, or the right hand one hangs off the side and the middle one is
+// not where it looks.
 func TestTheColumnsAddUpToTheTerminal(t *testing.T) {
 	for _, width := range []int{84, 100, 120, 160, 200, 240} {
 		m := initialModel(nil, nil)
@@ -834,10 +783,8 @@ func TestTheColumnsAddUpToTheTerminal(t *testing.T) {
 	}
 }
 
-// TestTheBarIsSixRowsAndFits checks the player bar is exactly as tall as the
-// layout says it is. It grew from four rows to six when the volume and the
-// transport moved onto their own lines, and if the two numbers ever disagree the
-// bottom of the screen is either left unpainted or pushed off the terminal.
+// The player bar is exactly as tall as the layout says. If the two numbers disagree
+// the bottom of the screen is either left unpainted or pushed off the terminal.
 func TestTheBarIsSixRowsAndFits(t *testing.T) {
 	for _, width := range []int{60, 80, 100, 120, 200} {
 		m := initialModel(nil, nil)
@@ -853,9 +800,8 @@ func TestTheBarIsSixRowsAndFits(t *testing.T) {
 	}
 }
 
-// TestTheTitleIsCentred checks the song title sits in the middle of the bar. It
-// is the one line on the bar that is about the music rather than the controls, so
-// it is the one that belongs in the middle.
+// The song title sits in the middle of the bar: it is the one line about the music
+// rather than the controls.
 func TestTheTitleIsCentred(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.width, m.height = 100, 30
@@ -879,9 +825,8 @@ func TestTheTitleIsCentred(t *testing.T) {
 	}
 }
 
-// TestVolumeAndTransportAreBelowTheProgressBar checks the bar is in the order
-// asked for: title, then the progress bar, then the volume and the transport
-// underneath it rather than sharing a line with the bar.
+// The bar is in the order asked for: title, progress bar, then the volume and
+// transport underneath rather than sharing a line with the bar.
 func TestVolumeAndTransportAreBelowTheProgressBar(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.width, m.height = 120, 30
@@ -915,8 +860,8 @@ func TestVolumeAndTransportAreBelowTheProgressBar(t *testing.T) {
 	}
 }
 
-// TestArrowKeysSeek checks left and right move the playhead, and that up and down
-// do not, because there is no list on the player screen for them to move through.
+// Left and right move the playhead; up and down do not, because there is no list on
+// the player screen for them to move through.
 func TestArrowKeysSeek(t *testing.T) {
 	// a player is needed, because seeking is the player's job and a model built
 	// with none of them does nothing on any key
@@ -964,14 +909,11 @@ func TestArrowKeysSeek(t *testing.T) {
 	}
 }
 
-// TestANoticeNeverResizesTheCover is the bug from the other side: whatever the
-// cover is sized from, it must not change while one track plays.
-//
-// The cover is drawn once and kept, keyed by the track and the width it was drawn
-// at. A width that moved during a track would mean the drawing was thrown away
-// with nothing to replace it, and the cover would blink out every time a key was
-// pressed. Volume, shuffle, repeat and mute all raise a notice, so every one of
-// them is a thing the user does often.
+// Whatever the cover is sized from, it must not change while one track plays. It is
+// drawn once and kept, keyed by track and width, so a width that moved during a
+// track would throw the drawing away with nothing to replace it and the cover would
+// blink out on every key press. Volume, shuffle, repeat and mute all raise a
+// notice.
 func TestANoticeNeverResizesTheCover(t *testing.T) {
 	m := initialModel(nil, nil)
 	m.width, m.height = 120, 34
@@ -1007,23 +949,16 @@ func TestANoticeNeverResizesTheCover(t *testing.T) {
 	}
 }
 
-// sgrState is defined in sgr.go, which is a small model of how a terminal reads
-// the colour codes in a line.
+// sgrState is in sgr.go.
 
-// TestNoCellIsLeftUnpainted is the test for a transparent screen.
+// Every cell needs a background of its own; one without shows the terminal's own,
+// invisible on a dark terminal and the desktop on a transparent one.
 //
-// The frame is a background colour with text on it, so every cell needs a
-// background of its own. A cell without one is left showing the terminal's own
-// background, which is invisible on a dark terminal and is the desktop showing
-// through on a transparent one.
-//
-// This walks the frame the way a terminal walks it, tracking the colour state
-// cell by cell, rather than looking for a background code somewhere in each
-// line. That distinction is the whole point: a line can contain a background code
-// and still leave most of itself unpainted. That is exactly what happened twice
-// here, once because a border had a foreground but no background, and once
-// because every coloured run of text ended in a full reset, which took the box's
-// background with it and left the padding to either side of the text unpainted.
+// Walks the frame the way a terminal walks it, tracking colour state cell by cell,
+// rather than looking for a background code somewhere in each line. A line can
+// contain one and still leave most of itself unpainted, which is exactly what
+// happened twice here: a border with a foreground but no background, and every
+// coloured run ending in a full reset that took the box's background with it.
 func TestNoCellIsLeftUnpainted(t *testing.T) {
 	for _, size := range [][2]int{{200, 50}, {160, 44}, {120, 36}, {100, 30}, {84, 24}, {60, 20}} {
 		for _, mode := range []mode{modeMenu, modeSearch, modeResults, modeFiles, modeHistory, modePlaying} {
@@ -1065,11 +1000,11 @@ func TestNoCellIsLeftUnpainted(t *testing.T) {
 	}
 }
 
-// modelWithEverything builds a model in the worst state the drawing code can be
-// asked for: a track playing with a cover, a full queue, a long title, a notice,
-// a failure, a long list with the cursor in the middle of it and a history to
-// show. Every screen is then drawn with all of that in place, so a line that only
-// goes wrong when everything is set is still covered.
+// A model in the worst state the drawing code can be asked for: a track playing
+// with a cover, a full queue, a long title, a notice, a failure, a long list with
+// the cursor in the middle and a history to show. Every screen is then drawn with
+// all of that in place, so a line that only goes wrong when everything is set is
+// still covered.
 func modelWithEverything(width, height int, mode mode) model {
 	m := initialModel(nil, nil)
 	m.width, m.height = width, height
@@ -1107,12 +1042,10 @@ func modelWithEverything(width, height int, mode mode) model {
 	return next.(model)
 }
 
-// TestTheArtFitsTheRoomItWasGiven checks the cover is never taller than the rows
-// reserved for it.
-//
-// The width is worked out before the picture has arrived, from the shape a
-// thumbnail is, and the picture is then drawn at that width. If the two disagree
-// about how tall it comes out, the art is taller than its slot and the middle box
+// The cover is never taller than the rows reserved for it. The width is worked out
+// before the picture arrives, from the shape a thumbnail is, and the picture is
+// then drawn at that width. If the two disagree about how tall it comes out, the
+// art is taller than its slot and the middle box
 // is cut off in the middle of the picture. This is the check on that: the room
 // is reserved from one function and the art is measured off the other.
 func TestTheArtFitsTheRoomItWasGiven(t *testing.T) {
@@ -1131,8 +1064,8 @@ func TestTheArtFitsTheRoomItWasGiven(t *testing.T) {
 			}
 
 			// what the art is actually drawn at, and how many rows that is. The
-			// render ends every line with a newline, so the count is the number of
-			// newlines and not one more than that.
+			// render ends every line with a newline, so the count is the newlines
+			// and not one more than that.
 			art := coverArt(width)
 			drawn := strings.Count(art, "\n")
 
@@ -1142,7 +1075,7 @@ func TestTheArtFitsTheRoomItWasGiven(t *testing.T) {
 			}
 
 			// and the two functions that work the shape out must agree with the
-			// renderer about it
+			// renderer about it, or the cover overflows its slot
 			if got, want := asciiart.RowsFor(width), drawn; got != want {
 				t.Errorf("%dx%d mode %d: at %d columns RowsFor says %d rows and the art came out %d",
 					m.width, m.height, mode, width, got, want)
@@ -1151,9 +1084,8 @@ func TestTheArtFitsTheRoomItWasGiven(t *testing.T) {
 	}
 }
 
-// TestTheArtIsWiderThanItIsTall checks the cover comes out the shape of a video
-// thumbnail rather than a square. A square drawing of a 16:9 picture is a third
-// of the picture thrown away.
+// The cover comes out the shape of a video thumbnail rather than a square: a
+// square drawing of a 16:9 picture throws a third of it away.
 func TestTheArtIsWiderThanItIsTall(t *testing.T) {
 	m := modelWithEverything(150, 40, modePlaying)
 	width := m.artWidth()
@@ -1168,4 +1100,124 @@ func TestTheArtIsWiderThanItIsTall(t *testing.T) {
 	if rows >= cols {
 		t.Errorf("the art is %d rows by %d columns, which is not a 16:9 thumbnail", rows, cols)
 	}
+}
+
+// TestTheCursorColourStaysOnTheCursor checks that the accent colour is on the
+// menu row under the cursor and on no other row.
+//
+// fg() leaves a colour open at the end of a line on purpose, so that a box's
+// background survives to the end of that line. That is right within one line, but
+// lipgloss word-wraps a block before styling it, and its wrapper re-states any
+// style still open when it reaches a newline. An accent left open on the selected
+// row was therefore carried onto every row below it, which turned the whole menu
+// the colour of the cursor.
+//
+// The frame is walked the way a terminal walks it, as TestNoCellIsLeftUnpainted
+// does, because a colour being present in a line is not the same as it being in
+// force when a particular character is written.
+func TestTheCursorColourStaysOnTheCursor(t *testing.T) {
+	accentSGR := accentRGB()
+
+	for _, cursor := range []int{0, 2, len(menuItems) - 1} {
+		for _, size := range [][2]int{{160, 44}, {120, 34}, {100, 30}} {
+			m := modelWithEverything(size[0], size[1], modeMenu)
+			m.mode = modeMenu
+			m.menuCursor = cursor
+
+			for row, text := range strings.Split(m.View().Content, "\n") {
+				plain, fg := plainAndForeground(text)
+
+				if !strings.Contains(plain, menuItems[cursor]) {
+					continue // a row that is not the selected one
+				}
+				if fg != accentSGR {
+					t.Errorf("cursor %d at %dx%d: %q is on row %d but its foreground is %q, want the accent",
+						cursor, size[0], size[1], menuItems[cursor], row, fg)
+				}
+			}
+		}
+	}
+}
+
+// TestNoOtherMenuRowTakesTheCursorColour is the other half of the same
+// mistake: not only should the selected row be accented, no other row should be.
+// It is a separate test because the failure looks different, and because the
+// first one would pass if the cursor row were the only row drawn at all.
+func TestNoOtherMenuRowTakesTheCursorColour(t *testing.T) {
+	accentSGR := accentRGB()
+
+	for cursor := range menuItems {
+		m := modelWithEverything(120, 34, modeMenu)
+		m.mode = modeMenu
+		m.menuCursor = cursor
+
+		for _, choice := range menuItems {
+			if choice == menuItems[cursor] {
+				continue
+			}
+
+			for row, text := range strings.Split(m.View().Content, "\n") {
+				plain, fg := plainAndForeground(text)
+				if !strings.Contains(plain, choice) {
+					continue
+				}
+				if fg == accentSGR {
+					t.Errorf("cursor on %q: %q on row %d is accented as well",
+						menuItems[cursor], choice, row)
+				}
+			}
+		}
+	}
+}
+
+// plainAndForeground strips the escape codes out of a line and reports the
+// foreground in force at the first character that is actually painted.
+//
+// The first painted character is the one that matters: it is the first thing a
+// reader sees on the row, and it is where a leaked colour shows up first. Later
+// characters on the same row can legitimately change colour.
+func plainAndForeground(line string) (string, string) {
+	var st sgrState
+	var plain strings.Builder
+	var foreground string
+	seen := false
+
+	runes := []rune(line)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == 0x1b && i+1 < len(runes) && runes[i+1] == '[' {
+			end := i + 2
+			for end < len(runes) && runes[end] != 'm' {
+				end++
+			}
+			if end < len(runes) {
+				st = st.apply(string(runes[i+2 : end]))
+				i = end
+				continue
+			}
+		}
+		if unicode.IsSpace(runes[i]) {
+			plain.WriteRune(runes[i])
+			continue
+		}
+		if !seen {
+			// the state is read before the character is written, because the
+			// character is what the state applies to
+			foreground = st.fg
+			seen = true
+		}
+		plain.WriteRune(runes[i])
+	}
+
+	return plain.String(), foreground
+}
+
+// accentRGB is the accent colour as the numbers a terminal reads out of an
+// escape sequence, in the form sgrState keeps them in. The leading 38 is the
+// instruction to set a foreground and is part of what sgrState stores.
+func accentRGB() string {
+	n, err := strconv.ParseUint(strings.TrimPrefix(accent, "#"), 16, 32)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("38;2;%d;%d;%d", n>>16&0xFF, n>>8&0xFF, n&0xFF)
 }
