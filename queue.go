@@ -17,6 +17,7 @@ func (m model) playQueue(queue []Track) (tea.Model, tea.Cmd) {
 	m.index = 0
 	m.queueWanted = 0
 	m.mode = modePlaying
+	m.rolling = true
 
 	// Shuffle happens once, here, rather than on every track: doing it per track
 	// would keep changing the order as you listen.
@@ -72,6 +73,10 @@ func (m *model) stopTrack() {
 }
 
 func (m model) move(delta int) (tea.Model, tea.Cmd) {
+	// nothing queued
+	if len(m.queue) == 0 {
+		return m, nil
+	}
 	m.index += delta
 
 	if m.index >= len(m.queue) {
@@ -94,12 +99,20 @@ func (m model) move(delta int) (tea.Model, tea.Cmd) {
 	return m, m.startTrack()
 }
 
+// Leaves the player screen without touching the audio.
+func (m model) leavePlayer() (tea.Model, tea.Cmd) {
+	m.mode = modeMenu
+	return m, nil
+}
+
+// earlier used to stop all music , not only for queue ending or music ending
 func (m model) backToMenu() (tea.Model, tea.Cmd) {
 	m.stopTrack()
 	m.mode = modeMenu
 	m.queue = nil
 	m.queueWanted = 0
 	m.loading = false
+	m.rolling = false
 
 	// Discord goes to idle once, here, rather than between every pair of tracks,
 	// or the presence flickers in the gap.
@@ -137,27 +150,29 @@ func (m model) seek(delta time.Duration) (tea.Model, tea.Cmd) {
 // it is the first thing that happens every run.
 func (m model) onTick() (tea.Model, tea.Cmd) {
 	m.spin++
-
-	if m.mode != modePlaying || m.loading || m.player == nil {
+	// notices and expiries
+	// Check expiry before other guards so notices don't disappear instantly or persist across screens.
+	if m.notice != "" && time.Now().After(m.noticeUntil) {
+		m.notice = ""
+	}
+	// Track playback progress , not screen mode , so the progress bar keeps updating when the user leaves the player screen ( rolling )
+	if m.rolling && m.player != nil && !m.loading {
+		// Use mpv's playback position directly; it already accounts for read-ahead.
+		m.elapsed = m.player.Position()
+		m.length = m.player.Length()
+	}
+	// nothing loaded or track still starting , clock on tho
+	if !m.rolling || m.loading || m.player == nil {
 		return m, tick()
 	}
-
 	if !m.player.Playing() && !m.paused {
-		// The tick has to be batched in here rather than trusted to be in what
-		// move() returned: move returns a command to open the next track, or one
-		// to shut the presence down, and neither is a tick. Returning it unadorned
-		// froze the whole display the first time a song ended. Batched rather than
-		// started separately, so there is still exactly one chain of them.
+		// Keep updates running when a song ends, so the display doesn't freeze
 		if err := m.player.Err(); err != nil {
-			// A track that broke is not the same as reaching the end of one. Only a
-			// clean finish earns a history row, or every track that failed to
-			// stream would end up in it.
+			// Only save tracks that finish normally, not ones that fail to play
 			log.Printf("play %s: %v", m.track.label(), err)
-			m.lastError = "Playback failed: " + err.Error()
+			m.lastError = "playback failed : " + err.Error()
 
-			// Move on rather than sit here: leaving the stopped player in the model
-			// means the next tick finds the same error and does all of this again,
-			// ten times a second, for as long as the app is left open.
+			// Skip the failed track to prevent the same error repeating every tick
 			next, cmd := m.move(1)
 			return next, tea.Batch(cmd, tick())
 		}
@@ -165,18 +180,6 @@ func (m model) onTick() (tea.Model, tea.Cmd) {
 		next, cmd := m.move(1)
 		return next, tea.Batch(cmd, tick())
 	}
-
-	// mpv is the one playing, so it knows exactly where it is, read-ahead included,
-	// and there is nothing to subtract.
-	m.elapsed = m.player.Position()
-	m.length = m.player.Length()
-
-	// a notice with no expiry would be wiped a tenth of a second after the key
-	// that made it, too fast to read
-	if m.notice != "" && time.Now().After(m.noticeUntil) {
-		m.notice = ""
-	}
-
 	return m, tick()
 }
 

@@ -21,6 +21,13 @@ func (m model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.quit()
 	}
 
+	// Music keys work on every screen, except the search box where keys are used for typing
+	if m.mode != modeSearch {
+		if next, cmd, handled := m.transportKey(msg); handled {
+			return next, cmd
+		}
+	}
+
 	switch m.mode {
 	case modeMenu:
 		return m.onMenuKey(msg)
@@ -235,16 +242,11 @@ func (m model) onListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// While a track is starting, the only key that does anything is one that gives
-	// up and goes back, so a broken track cannot trap the user here.
+// Handle music keys on any screen, pass other keys through, and ignore music keys until a track is loaded
+func (m model) transportKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if m.loading {
-		if msg.String() == "esc" {
-			return m.backToMenu()
-		}
-		return m, nil
+		return m, nil, false
 	}
-
 	switch msg.String() {
 	case "p":
 		if m.paused {
@@ -252,42 +254,41 @@ func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.player != nil {
 				m.player.Play()
 			}
-			// Discord gets the original start time again, so the time it counts
-			// matches what has actually been heard.
-			return m, m.presence.showCmd(m.track, m.startTime)
+			return m, m.presence.showCmd(m.track, m.startTime), true
 		}
 		m.paused = true
 		if m.player != nil {
 			m.player.Pause()
 		}
-		return m, m.presence.hideCmd()
+		return m, m.presence.hideCmd(), true
 
-	// The arrows seek, which is what a play/pause bar with a progress line in it
-	// makes you expect. h and l still work: they were here first and there is no
-	// reason to take them away.
-	//
-	// Up and down are unbound here because this screen has no list to move a
-	// cursor through, so they would be two keys that do nothing.
+		// Arrow keys seek through the track; h and l still work too
 	case "left", "h":
-		return m.seek(-5 * time.Second)
+		next, cmd := m.seek(-5 * time.Second)
+		return next, cmd, true
 	case "right", "l":
-		return m.seek(5 * time.Second)
+		next, cmd := m.seek(5 * time.Second)
+		return next, cmd, true
 
 	case "a":
-		// no wrap: the first track has nowhere to go back to
+		// Don't wrap around; the first track has no previous track
 		if m.index > 0 {
-			return m.move(-1)
+			next, cmd := m.move(-1)
+			return next, cmd, true
 		}
-		return m, nil
+		return m, nil, true
+
 	case "d":
-		return m.move(1)
+		next, cmd := m.move(1)
+		return next, cmd, true
 
 	case "s":
 		m.say(m.opts.toggle("shuffle", &m.opts.shuffle))
-		return m, nil
+		return m, nil, true
+
 	case "r":
 		m.say(m.opts.toggle("repeat", &m.opts.repeat))
-		return m, nil
+		return m, nil, true
 
 	case "m":
 		if m.muted {
@@ -303,30 +304,36 @@ func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.say("unmuted")
 		}
-		return m, nil
+		return m, nil, true
 
-	// = as well as +, because + needs shift and terminals disagree about what
-	// shift and equals sends.
+		// Support = and + because keyboard layouts handle Shift+= differently
 	case "+", "=":
 		m.volume = clampVolume(m.volume + 0.05)
 		if m.player != nil {
 			m.player.SetVolume(m.soundVolume())
 		}
 		m.say(fmt.Sprintf("volume %d%%", int(m.volume*100+0.5)))
-		return m, nil
+		return m, nil, true
 	case "-", "_":
 		m.volume = clampVolume(m.volume - 0.05)
 		if m.player != nil {
 			m.player.SetVolume(m.soundVolume())
 		}
 		m.say(fmt.Sprintf("volume %d%%", int(m.volume*100+0.5)))
-		return m, nil
+		return m, nil, true
+	}
+	return m, nil, false
+}
 
-	case "q":
-		return m.backToMenu()
+func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		return m.leavePlayer()
 	}
 
-	return m, nil
+	// everythig else here is the music , handlede exacactly as it is everywhere else
+	next, cmd, _ := m.transportKey(msg)
+	return next, cmd
 }
 
 // What to hand the player: zero while muted, otherwise the volume. The volume

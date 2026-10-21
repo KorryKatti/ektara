@@ -197,6 +197,10 @@ type model struct {
 	// Whether the queue was already shuffled, so turning shuffle on part way
 	// through shuffles only what is left to play.
 	wasShuffled bool
+
+	// true from the moment a queue starts until it runs out or program tstops
+	// basically doing independence , letting music continue while the whole app is browseable.
+	rolling bool
 }
 
 // One row in a list screen.

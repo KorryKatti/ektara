@@ -335,6 +335,7 @@ func (m model) frame(content string) string {
 // The cursor only moves on the menu screen, so elsewhere this is a list of where
 // you can go rather than where you are. That is why there is no marker there.
 func (m model) drawSidebar() string {
+
 	var b strings.Builder
 
 	b.WriteString(fg(dimStyle, "MENU") + "\n\n")
@@ -411,12 +412,19 @@ func (m model) queueLine(i int, nowPlaying bool) string {
 // screen's own contents and a failure, and a notice is the answer to a key press,
 // so it belongs somewhere always there that costs the box nothing.
 func (m model) drawPlayerBar() string {
-	// Every line here is clipped to the width of the bar. Not tidiness: a long line
-	// would wrap onto a second row, and the bar is a fixed height, so the extra row
-	// would push the bottom of the screen off the terminal.
+	// Clip lines to the bar's width to prevent wrapping and pushing content off-screen.
 	inside := m.width - 4 // two for the padding, two to spare
 
 	var b strings.Builder
+
+	// Show loading status on the bar so it doesn't look frozen, and limit it to five lines to keep the screen visible
+	if m.track.Title != "" && m.loading {
+		b.WriteString(m.centred(clip(m.track.Title, inside), inside) + "\n")
+		b.WriteString(m.drawPlayerKeys(inside) + "\n")
+		b.WriteString(m.drawTransport(inside) + "\n")
+		b.WriteString(m.centred("esc back", inside))
+		return b.String()
+	}
 
 	// Before anything has played there is no track, so the bar says so rather than
 	// showing a row of zeroes. The keys are still shown, because they are how
