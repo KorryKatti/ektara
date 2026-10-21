@@ -215,6 +215,7 @@ func TestOnTickAlwaysKeepsTheClockRunning(t *testing.T) {
 		}},
 		{"a track that ended, with another to play", func(m model) model {
 			m.mode = modePlaying
+			m.rolling = true
 			m.player = &fakeAudio{playing: false}
 			m.queue = queue
 			m.track = queue[0]
@@ -222,6 +223,7 @@ func TestOnTickAlwaysKeepsTheClockRunning(t *testing.T) {
 		}},
 		{"a track that ended, with one left in the queue", func(m model) model {
 			m.mode = modePlaying
+			m.rolling = true
 			m.player = &fakeAudio{playing: false}
 			m.queue = queue
 			m.index = 1
@@ -230,6 +232,7 @@ func TestOnTickAlwaysKeepsTheClockRunning(t *testing.T) {
 		}},
 		{"a track that broke, with another to play", func(m model) model {
 			m.mode = modePlaying
+			m.rolling = true
 			m.player = &fakeAudio{playing: false, err: errors.New("it broke")}
 			m.queue = queue
 			m.track = queue[0]
@@ -237,6 +240,7 @@ func TestOnTickAlwaysKeepsTheClockRunning(t *testing.T) {
 		}},
 		{"a track still going", func(m model) model {
 			m.mode = modePlaying
+			m.rolling = true
 			m.player = &fakeAudio{playing: true}
 			m.queue = queue
 			return m
@@ -270,6 +274,7 @@ func TestEndOfTrackKeepsTheClockRunning(t *testing.T) {
 
 	m := initialModel(songDB(t), nil)
 	m.mode = modePlaying
+	m.rolling = true
 	m.player = &fakeAudio{playing: false}
 	m.queue = queue
 	m.track = queue[0]
@@ -331,6 +336,7 @@ func TestEndOfTrackMovesTheQueueOn(t *testing.T) {
 	fake := &fakeAudio{playing: false}
 	m := initialModel(songDB(t), nil)
 	m.mode = modePlaying
+	m.rolling = true
 	m.player = fake
 	m.queue = queue
 	m.track = queue[0]
@@ -359,6 +365,7 @@ func TestEndOfLastTrackReturnsToTheMenu(t *testing.T) {
 
 	m := initialModel(songDB(t), nil)
 	m.mode = modePlaying
+	m.rolling = true
 	m.player = &fakeAudio{playing: false}
 	m.queue = queue
 	m.index = 0
