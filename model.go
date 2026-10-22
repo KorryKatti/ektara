@@ -85,6 +85,10 @@ type searchedMsg struct {
 type downloadedMsg struct {
 	track Track
 	err   error
+
+	// True if the download is queued instead of played
+
+	forQueue bool
 }
 
 // An empty list with no error means there is nothing to show, which is different

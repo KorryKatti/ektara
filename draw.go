@@ -865,7 +865,7 @@ func (m model) drawItems() string {
 			start+1, start+count, len(m.items))) + "\n")
 	}
 
-	b.WriteString("\n" + fg(dimStyle, "up/down move, enter play, esc back") + "\n")
+	b.WriteString("\n" + fg(dimStyle, "up/down move, enter play, e add to queue, esc back") + "\n")
 
 	return m.frame(b.String())
 }

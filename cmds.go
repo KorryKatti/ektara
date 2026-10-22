@@ -48,9 +48,12 @@ func recentCmd(db *sql.DB) tea.Cmd {
 	}
 }
 
-func downloadCmd(id, title string) tea.Cmd {
+// Downloads a YouTube video as MP3 and returns the track
+// forQueue indicates whether to queue or play the track
+
+func downloadCmd(id, title string, forQueue bool) tea.Cmd {
 	return func() tea.Msg {
 		track, err := downloadVideo(id, title)
-		return downloadedMsg{track: track, err: err}
+		return downloadedMsg{track: track, err: err, forQueue: forQueue}
 	}
 }

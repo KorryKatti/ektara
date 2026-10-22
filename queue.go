@@ -29,6 +29,17 @@ func (m model) playQueue(queue []Track) (tea.Model, tea.Cmd) {
 	return m, m.startTrack()
 }
 
+// Adds a track to the queue without interrupting playback; plays it immediately if nothing is playing
+
+func (m model) enqueue(t Track) (tea.Model, tea.Cmd) {
+	if !m.rolling {
+		return m.playQueue([]Track{t})
+	}
+	m.queue = append(m.queue, t)
+	m.say("queued: " + t.Title)
+	return m, nil
+}
+
 // Sets the model up for the current position and goes off to open the audio. It
 // does not open it here, because opening is slow and would freeze the display.
 func (m *model) startTrack() tea.Cmd {
@@ -252,11 +263,16 @@ func (m model) onSearched(msg searchedMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// Queues the downloaded track without interrupting playback
+
 func (m model) onDownloaded(msg downloadedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		m.say("Download failed: " + msg.err.Error())
+		m.say("download failed: " + msg.err.Error())
 		m.mode = modeMenu
 		return m, nil
+	}
+	if msg.forQueue {
+		return m.enqueue(msg.track)
 	}
 	return m.playQueue([]Track{msg.track})
 }

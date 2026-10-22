@@ -171,8 +171,7 @@ func (m model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// Reads the number that was typed and starts collecting that many tracks. A
-// queue of one is the same as no queue at all, so it is not treated as one.
+// Collects the requested number of tracks; a single track plays normally
 func (m model) startQueue() (tea.Model, tea.Cmd) {
 	n := 0
 	if _, err := fmt.Sscanf(strings.TrimSpace(m.searchInput), "%d", &n); err != nil || n < 1 {
@@ -188,7 +187,11 @@ func (m model) startQueue() (tea.Model, tea.Cmd) {
 	}
 
 	m.queueWanted = n
-	m.queue = nil
+	// Appends tracks to the current queue if playing; otherwise starts a new queue
+	if !m.rolling {
+		m.queue = nil
+	}
+	//m.queue = nil
 	m.mode = modeMenu
 	m.menuCursor = 0
 	return m, nil
@@ -211,31 +214,40 @@ func (m model) onListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.itemCursor++
 		}
 
-	case "enter":
+	// Enter plays the selected track; e queues it for quick access
+	case "enter", "e":
 		if m.itemCursor >= len(m.items) {
 			return m, nil
 		}
 		picked := m.items[m.itemCursor]
+		adding := msg.String() == "e"
 
-		// A search result has to be saved to disk before it can play, so picking
-		// one starts the download and plays it when it lands.
+		// Downloads the selected result and plays it when ready
 		if picked.needsDownload {
-			m.say("Downloading...")
-			return m, downloadCmd(picked.track.ID, picked.track.Title)
+			m.say("Downloading ...")
+			return m, downloadCmd(picked.track.ID, picked.track.Title, adding)
 		}
 
-		// Still collecting for a queue: add this one, and if it was the last asked
-		// for, play what has been collected.
+		// Adds the track to the queue and plays when all requested tracks are collected
 		if m.queueWanted > 0 {
 			m.queue = append(m.queue, picked.track)
 			m.queueWanted--
 			if m.queueWanted == 0 {
+				// Appends the new queue to the current one without interrupting playback
+				if m.rolling {
+					m.say("added to the queue")
+					m.mode = modeMenu
+					return m, nil
+				}
 				return m.playQueue(m.queue)
 			}
 			m.mode = modeMenu
 			return m, nil
+			// doc strings are amazing i should ask ai to add it to all the things
 		}
-
+		if adding {
+			return m.enqueue(picked.track)
+		}
 		return m.playQueue([]Track{picked.track})
 	}
 
