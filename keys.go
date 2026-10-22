@@ -261,12 +261,13 @@ func (m model) transportKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 			m.player.Pause()
 		}
 		return m, m.presence.hideCmd(), true
-
-		// Arrow keys seek through the track; h and l still work too
-	case "left", "h":
+		// The arrow keys seek through the track. h and l used to do it as well,
+		// but l is the lyrics key now, and half a pair is worse than none.
+	case "left":
 		next, cmd := m.seek(-5 * time.Second)
 		return next, cmd, true
-	case "right", "l":
+
+	case "right":
 		next, cmd := m.seek(5 * time.Second)
 		return next, cmd, true
 

@@ -44,7 +44,7 @@ when there's a queue. With one track, `d` returns to the menu.
 
 ## Keys
 
-Playing: `p` pause, `←`/`→` (or `h`/`l`) seek 5s, `a`/`d` prev and next, `s`
+Playing: `p` pause, `←`/`→` seek 5s, `a`/`d` prev and next, `s`
 shuffle, `r` repeat, `m` mute, `+`/`-` volume, `q` back to the menu.
 
 A list, or the search box: `↑`/`↓` or `k`/`j` move, `enter` picks, `esc` or `q`
