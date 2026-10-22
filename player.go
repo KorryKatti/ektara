@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/lrstanley/go-ytdlp"
 	_ "github.com/mattn/go-sqlite3"
@@ -23,19 +24,24 @@ type Track struct {
 	// The local mp3 to decode. Empty when Stream is true.
 	Filename string
 	// The canonical youtube.com/watch?v=... address, stored instead of the direct
-	// media url because that carries an expiring token and is useless once it
-	// lapses. Empty for local files, which is also how a streamed row is told
-	// apart from a downloaded one.
+	// media url because that carries an expiring token. Empty for local files,
+	// which is also how a streamed row is told apart from a downloaded one.
 	PageURL string
 	// Play the audio over the network instead of from disk.
 	Stream bool
+
+	// What the music is, as far as we know: who made it, what it is on, what it
+	// sounds like and how long it runs. Empty when nothing said.
+	Artist string
+	Album  string
+	// The name of the song, which is not always the name of the video.
+	Song     string
+	Genres   []string
+	Duration time.Duration
 }
 
-// Puts the queue in a random order, in place.
-//
-// Swaps each track with a random other track rather than picking a random track
-// to play next, so every track is heard exactly once and none is left sitting at
-// the end by accident.
+// Puts the queue in a random order, in place. Each track is swapped with a random
+// other one, so every track is heard exactly once.
 func shuffleQueue(queue []Track) {
 	for i := range queue {
 		j := rand.Intn(len(queue))
@@ -50,9 +56,7 @@ type options struct {
 }
 
 // Flips one of the options and says what it became, so the user can see the state
-// without having to remember it. Returned rather than printed, because the display
-// is redrawn constantly and anything printed straight to the terminal would be
-// wiped on the next frame.
+// without having to remember it.
 func (o *options) toggle(name string, field *bool) string {
 	*field = !*field
 	return fmt.Sprintf("%s %s", name, onOff(*field))
@@ -74,7 +78,7 @@ func openDB() (*sql.DB, error) {
 	}
 
 	// Older versions kept the database in whichever folder the program was started
-	// from. Bring one across if the library has none, so the history is not lost.
+	// from. Bring one across if the library has none.
 	adoptLegacyDB(path)
 
 	db, err := sql.Open("sqlite3", path)
@@ -94,9 +98,10 @@ func openDB() (*sql.DB, error) {
 		return nil, err
 	}
 
-	// url and title are only set for streamed tracks. An empty url marks a row as a
-	// local file, so there is no separate flag column.
-	for _, col := range []string{"url TEXT", "title TEXT"} {
+	// url and title are only set for streamed tracks. An empty url marks a row as
+	// a local file, so there is no separate flag column. The rest is what we know
+	// about the music itself.
+	for _, col := range []string{"url TEXT", "title TEXT", "artist TEXT", "album TEXT", "song TEXT", "genres TEXT", "duration INTEGER"} {
 		if _, err := db.Exec("ALTER TABLE songs ADD COLUMN " + col); err != nil &&
 			!strings.Contains(err.Error(), "duplicate column name") {
 			log.Printf("migrate songs: %v", err)
@@ -114,9 +119,7 @@ func openDB() (*sql.DB, error) {
 // Brings across a songs.db left in the working directory by an older version, but
 // only when the library has no database of its own.
 //
-// Copies rather than moves: the original stays where it was, so a migration that
-// goes wrong can be undone by deleting the new file and nothing the user cared
-// about has been taken away.
+// Copies rather than moves, so a migration that goes wrong can be undone.
 func adoptLegacyDB(dst string) {
 	if _, err := os.Stat(dst); err == nil {
 		return // not a first run, so the old one has nothing to teach us
@@ -135,14 +138,8 @@ func adoptLegacyDB(dst string) {
 	log.Printf("copied the old database from %s to %s", legacy, dst)
 }
 
-// The cover image for a YouTube video, or "" when there is no id to build one from.
-//
-// Nothing is fetched here and nothing is stored, which is the point: Discord
-// downloads the image itself from this address. This used to consult a metadata
-// table to save a lookup on repeat plays, but the url is a fixed pattern with the
-// id dropped in, so the table only remembered a string that could be rebuilt for
-// free: two queries instead of one Sprintf, plus a table to create and migrate on
-// every install. When there is a real lookup to save, this is the seam for it.
+// The cover image for a YouTube video, or "" when there is no id to build one
+// from. Nothing is fetched here and nothing is stored.
 func thumbnailURL(id string) string {
 	if id == "" {
 		return ""
@@ -151,28 +148,27 @@ func thumbnailURL(id string) string {
 }
 
 // Records a track in the history, called after it has played rather than before,
-// so the history shows what was listened to rather than what was queued.
-//
-// A failure is logged and nothing more. It used to be fatal, which was wrong
-// twice over: the interface was mid-track, and a database problem is exactly the
-// sort of thing that comes back on its own a moment later. Ending the program
-// threw away the session over a hiccup, signalled only by a log line nowhere near
-// the screen.
+// so the history shows what was listened to rather than what was queued. A
+// failure is logged and nothing more.
 func logSong(db *sql.DB, t Track) {
 	if _, err := db.Exec(
-		"INSERT INTO songs (id,name,url,title) VALUES (?,?,?,?)",
+		"INSERT INTO songs (id,name,url,title,artist,album,song,genres,duration) VALUES (?,?,?,?,?,?,?,?,?)",
 		t.ID,
 		t.Filename,
 		t.PageURL,
 		t.Title,
+		t.Artist,
+		t.Album,
+		t.Song,
+		t.genreString(),
+		t.Duration.Milliseconds(),
 	); err != nil {
 		log.Printf("log song %s: %v", t.label(), err)
 	}
 }
 
 // A downloaded mp3's filename turned into something worth showing a human, with
-// the video id and the "youtube - " prefix that yt-dlp's output template adds
-// stripped off.
+// the video id and the "youtube - " prefix stripped off.
 func titleFromFilename(filename string) string {
 	title := strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))
 	if id := parseID(filename); id != "" {
@@ -183,13 +179,8 @@ func titleFromFilename(filename string) string {
 
 // Looks a name up on YouTube and returns the top few results.
 //
-// Only goes to YouTube when there is no recent answer to reuse, and waits its
-// turn first, so a burst of searching cannot arrive as a burst of requests. When
-// YouTube refuses, an older answer is used in place of an error, so an address it
-// has decided to block still plays the songs found before it started refusing.
-//
-// Shells out to yt-dlp and waits for a network round trip, so it is a tea.Cmd: the
-// display stays alive and can show a "searching" line while it runs.
+// Only goes to YouTube when there is no recent answer to reuse. When YouTube
+// refuses, an older answer is used in place of an error.
 func searchYouTube(db *sql.DB, query string) ([]video, error) {
 	if remembered, fresh := cachedSearch(db, query); fresh {
 		return remembered, nil
@@ -201,8 +192,7 @@ func searchYouTube(db *sql.DB, query string) ([]video, error) {
 
 	const limit = 3
 
-	// spaced out here rather than inside yt-dlp because the aim is to space out
-	// whole searches, not the requests inside one of them
+	// spaced out here rather than inside yt-dlp, to space out whole searches
 	youtubeLimiter.wait()
 
 	found, _, err := ytdlp.New().
@@ -210,8 +200,7 @@ func searchYouTube(db *sql.DB, query string) ([]video, error) {
 		FlatPlaylist().
 		ExtractInfo(context.TODO(), fmt.Sprintf("ytsearch%d:%s", limit, query))
 	if err != nil {
-		// YouTube is saying no. Something remembered beats an error, so a search
-		// done before still answers now.
+		// YouTube is saying no. Something remembered beats an error.
 		if remembered, ok := cachedSearch(db, query); ok && len(remembered) > 0 {
 			return remembered, nil
 		}
@@ -255,10 +244,12 @@ func downloadVideo(id, title string) (Track, error) {
 
 	res, err := ytdlp.New().
 		Retries("3").
-		// the same embedded client as streamURL, and for the same reason: the
-		// default web client gets the bot check
+		// the embedded client, because the default web client gets the bot check
 		ExtractorArgs("youtube:player_client=web_embedded").
 		SetWorkDir(dir).
+		// the tags go into the file, so the music carries its own details with it
+		// and other programs can read them
+		EmbedMetadata().
 		ExtractAudio().
 		AudioFormat("mp3").
 		Output("%(id)s %(extractor)s - %(title)s.%(ext)s").
@@ -275,7 +266,9 @@ func downloadVideo(id, title string) (Track, error) {
 
 	// The bare name, not the path yt-dlp printed: the library can move, the name
 	// cannot.
-	return Track{ID: id, Title: title, Filename: filepath.Base(filename)}, nil
+	track := Track{ID: id, Title: title, Filename: filepath.Base(filename)}
+	track.fillFromTitle()
+	return track, nil
 }
 
 // One YouTube search result.
@@ -285,8 +278,7 @@ type video struct {
 }
 
 // The mp3s in the library folder, as tracks ready to play. The title is worked out
-// from the filename, because a file downloaded from YouTube carries the real title
-// in its name.
+// from the filename, because a downloaded file carries the real title in its name.
 func localFiles() ([]Track, error) {
 	dir, err := musicDir()
 	if err != nil {
@@ -301,14 +293,17 @@ func localFiles() ([]Track, error) {
 	tracks := []Track{}
 	for _, name := range names {
 		// just the file name, not the whole path: a path in the database breaks if
-		// the library ever moves, and the folder is worked out again when the file
-		// is opened.
+		// the library ever moves.
 		base := filepath.Base(name)
-		tracks = append(tracks, Track{
+		track := Track{
 			ID:       parseID(base),
 			Title:    titleFromFilename(base),
 			Filename: base,
-		})
+		}
+		// The artist is usually only in the title, and the title is all a local
+		// file has.
+		track.fillFromTitle()
+		tracks = append(tracks, track)
 	}
 
 	return tracks, nil
@@ -320,17 +315,19 @@ type songRow struct {
 	Track Track
 }
 
-const songColumns = `seq,id,name,url,title`
+const songColumns = `seq,id,name,url,title,artist,album,song,genres,duration`
 
 func scanSong(rows interface{ Scan(...any) error }) (songRow, error) {
 	var (
-		row        songRow
-		id, name   sql.NullString
-		url, title sql.NullString
+		row                       songRow
+		id, name                  sql.NullString
+		url, title, artist, album sql.NullString
+		song                      sql.NullString
+		genres                    sql.NullString
+		duration                  sql.NullInt64
 	)
-	// Every column is nullable in sqlite's eyes: rows written before url and title
-	// existed have NULL there, and id is nullable in the schema.
-	err := rows.Scan(&row.Seq, &id, &name, &url, &title)
+	// Every column is nullable in sqlite's eyes, so they are all read as nullable.
+	err := rows.Scan(&row.Seq, &id, &name, &url, &title, &artist, &album, &song, &genres, &duration)
 	if err != nil {
 		return songRow{}, err
 	}
@@ -342,11 +339,17 @@ func scanSong(rows interface{ Scan(...any) error }) (songRow, error) {
 	if row.Track.Title == "" {
 		row.Track.Title = titleFromFilename(row.Track.Filename)
 	}
+	row.Track.Artist = artist.String
+	row.Track.Album = album.String
+	row.Track.Song = song.String
+	if genres.String != "" {
+		row.Track.Genres = strings.Split(genres.String, ",")
+	}
+	row.Track.Duration = time.Duration(duration.Int64) * time.Millisecond
 	return row, nil
 }
 
-// Every song that has been played, newest first, so the display can show them as
-// a list to walk through with the arrow keys instead of asking for a number.
+// Every song that has been played, newest first.
 func historyTracks(db *sql.DB) ([]Track, error) {
 	rows, err := db.Query(`SELECT ` + songColumns + ` FROM songs ORDER BY seq DESC`)
 	if err != nil {
@@ -392,8 +395,8 @@ func parseID(filename string) string {
 	return id
 }
 
-// The final line of s with its whitespace trimmed, or "" when s holds no such
-// line: yt-dlp reports the file it wrote as the last non empty line of its output.
+// The final non empty line of s with its whitespace trimmed: yt-dlp reports the
+// file it wrote as the last non empty line of its output.
 func lastNonEmptyLine(s string) string {
 	var last string
 	for _, line := range strings.Split(s, "\n") {

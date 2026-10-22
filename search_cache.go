@@ -3,12 +3,9 @@ package main
 // Search results are remembered, so searching twice does not ask YouTube twice
 // and so the program still works when YouTube says no.
 //
-// That second part is the point. The failures guarded against are not random:
-// they come back for hours, and they are the difference between a working player
-// and one that cannot play anything. A result found once is good enough to keep
-// using for a long time, because the top three videos for a song name do not
-// change from one day to the next. So the cache is generous on purpose: recent
-// results are used without asking, older ones when asking has failed.
+// The cache is generous on purpose: recent results are used without asking, older
+// ones when asking has failed, because a block lasts for hours and an old answer
+// beats no answer.
 
 import (
 	"database/sql"
@@ -19,18 +16,14 @@ import (
 )
 
 // How long a cached answer is used without asking YouTube whether it is still
-// right. A week is long enough that a song searched twice in a session never
-// reaches the network twice.
+// right.
 const searchCacheFreshFor = 7 * 24 * time.Hour
 
 // How long an answer is kept before being thrown away. Much longer than the fresh
-// window on purpose: an old answer is no good on its own, but it is what falls
-// back when YouTube is blocking.
+// window: an old answer is what falls back when YouTube is blocking.
 const searchCacheKeptFor = 90 * 24 * time.Hour
 
-// Adds the table the answers live in. Separate from openDB's other work because
-// nothing else needs it, and a database written by an older version has no such
-// table.
+// Adds the table the answers live in.
 func initSearchCache(db *sql.DB) error {
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS search_cache(
@@ -42,18 +35,14 @@ func initSearchCache(db *sql.DB) error {
 	return err
 }
 
-// Makes the same search always use the same key, so "Hello", " hello " and
-// "HELLO" share one entry instead of three.
+// Makes the same search always use the same key.
 func normaliseQuery(query string) string {
 	return strings.ToLower(strings.TrimSpace(query))
 }
 
 // The remembered answer for a query, and whether it was fresh enough to use
-// without asking YouTube again.
-//
-// An error is deliberately not returned: a cache that cannot be read is not worth
-// failing a search over, because the search itself may well succeed, and a missing
-// cache only costs the request it was meant to save.
+// without asking YouTube again. A cache that cannot be read is not worth failing
+// a search over.
 func cachedSearch(db *sql.DB, query string) (videos []video, fresh bool) {
 	var (
 		results   string
@@ -96,9 +85,7 @@ func storeSearch(db *sql.DB, query string, videos []video) {
 	}
 }
 
-// Throws away answers too old to be any use. Called after a search is stored rather
-// than on a timer: there is no need to be exact, and no reason to keep a table
-// growing forever.
+// Throws away answers too old to be any use.
 func pruneSearchCache(db *sql.DB) {
 	cutoff := time.Now().Add(-searchCacheKeptFor).Unix()
 	if _, err := db.Exec("DELETE FROM search_cache WHERE fetched_at < ?", cutoff); err != nil {

@@ -16,8 +16,7 @@ package main
 //	| > now playing  --------  2:31 / 4:12            |  <- player, four lines
 //	+--------------------------------------------------+
 //
-// Only the middle right box changes from mode to mode, so the screen never jumps
-// about as you move around it.
+// Only the middle right box changes from mode to mode.
 
 import (
 	"bytes"
@@ -37,18 +36,14 @@ import (
 	"ektara/asciiart"
 )
 
-// The heights and widths, as plain numbers so the arithmetic below can be read
-// off the drawing above.
+// The heights and widths, as plain numbers so the arithmetic can be read off the
+// drawing above.
 const (
 	titleHeight = 1
 
 	// The bar along the bottom, counting the line of border above it: five lines
-	// of text and that border.
-	//
-	// Passed to lipgloss as the height and taken off the terminal by the rest of
-	// the layout, so those have to be the same number: lipgloss counts the border
-	// as part of the height, and getting this wrong leaves the bottom row
-	// unpainted, showing the terminal's own background through the bar.
+	// of text and that border. lipgloss counts the border as part of the height,
+	// so getting this wrong leaves the bottom row unpainted.
 	playerBlockHeight = 6
 
 	// The menu column, padding included.
@@ -59,14 +54,12 @@ const (
 	queueWidth = 30
 
 	// The least room the middle box is worth having. Below this it has to start
-	// clipping its own text, so it is better to spend everything on it and drop a
-	// side column.
+	// clipping its own text, so a side column is dropped instead.
 	narrowestContent = 30
 )
 
 // Whether there is room for the menu down the left as well as the content beside
-// it. On a narrow terminal the menu goes away, because a clipped list is worse
-// than no list.
+// it. On a narrow terminal the menu goes away.
 func (m model) showSidebar() bool {
 	if m.width == 0 {
 		return true // before the size is known: the first frame is nearly always normal
@@ -75,10 +68,7 @@ func (m model) showSidebar() bool {
 }
 
 // Whether there is room for the up-next column once the menu and the content have
-// both been served.
-//
-// The menu is asked for first and this gives way, because a menu that is there
-// but useless is worse than one that is simply gone.
+// both been served. The menu is asked for first and this gives way.
 func (m model) showQueue() bool {
 	if m.width == 0 {
 		return true
@@ -90,8 +80,7 @@ func (m model) showQueue() bool {
 }
 
 // How many columns the middle box gets. Until the terminal has said how big it is
-// this is a made up number, because the first frame can arrive before the size
-// does.
+// this is a made up number.
 func (m model) contentWidth() int {
 	if m.width == 0 {
 		return 60
@@ -105,9 +94,7 @@ func (m model) contentWidth() int {
 	}
 
 	// A floor, so the box is never so narrow that a two letter name is the longest
-	// thing that fits. Not a promise about the terminal: one narrower than the
-	// floor gets the width it actually has, because overflowing is worse than a
-	// tight box.
+	// thing that fits.
 	if w < 10 {
 		w = 10
 	}
@@ -118,12 +105,7 @@ func (m model) contentWidth() int {
 }
 
 // How many lines the middle box has, once the title and the player bar have taken
-// theirs.
-//
-// The floor is one rather than something comfortable, because the player bar
-// cannot shrink: on a very short terminal, a generous minimum here would push the
-// bottom of the screen off it. One line is a poor home for a screen, but it is on
-// the screen.
+// theirs. The floor is one, because the player bar cannot shrink.
 func (m model) bodyHeight() int {
 	if m.height == 0 {
 		return 20
@@ -136,13 +118,9 @@ func (m model) bodyHeight() int {
 }
 
 // How many lines a screen may actually write: the box, less its own padding above
-// and below, less whatever the errors take at the bottom.
-//
-// Every screen sizes itself from this and the frame draws the box at bodyHeight.
-// They have to agree, or a screen fills the box, the errors get pushed off the
-// bottom, and the one line worth reading is the one that goes missing. That is the
-// whole reason this is a named number rather than the same subtraction in five
-// places.
+// and below, less whatever the errors take at the bottom. Every screen sizes
+// itself from this and the frame draws the box at bodyHeight, so they have to
+// agree.
 func (m model) drawRows() int {
 	rows := m.bodyHeight() - 2 - m.errorRows()
 	if rows < 1 {
@@ -152,8 +130,7 @@ func (m model) drawRows() int {
 }
 
 // The one colour that means "this is the important thing on screen": the title
-// bar, and the row the cursor is on. Both go through this one name, so changing
-// it is a single edit here.
+// bar, and the row the cursor is on.
 const accent = "#7C5CFF"
 
 // Kept in one place so the colours can be changed without hunting through the
@@ -173,9 +150,8 @@ var (
 			Background(lipgloss.Color("#181818"))
 
 	// The middle box. The cover art needs this background too, because a braille
-	// character is mostly gaps between its dots: without one of its own, every gap
-	// shows whatever is behind the drawing, so on a transparent terminal the cover
-	// sits in a bright rectangle.
+	// character is mostly gaps between its dots: without one of its own every gap
+	// shows whatever is behind the drawing.
 	contentPanel = lipgloss.Color("#121212")
 
 	contentStyle = lipgloss.NewStyle().
@@ -183,10 +159,9 @@ var (
 			Foreground(lipgloss.Color("#FFFFFF")).
 			Background(contentPanel)
 
-	// The bar along the bottom. The border needs this as well as the text, and
-	// that is not a detail: a border with no background of its own is drawn in the
-	// foreground colour alone, leaving the whole row showing the terminal's own
-	// background as a bright band across the bottom of the screen.
+	// The bar along the bottom. The border needs this as well as the text: a border
+	// with no background of its own leaves the whole row showing the terminal's
+	// own background as a bright band across the bottom of the screen.
 	playerPanel = lipgloss.Color("#181818")
 
 	playerStyle = lipgloss.NewStyle().
@@ -198,8 +173,7 @@ var (
 			BorderForeground(lipgloss.Color("#333333")).
 			BorderBackground(playerPanel)
 
-	// The column on the right, the same near black as the menu on the left so the
-	// middle box reads as the bright one.
+	// The column on the right, the same near black as the menu on the left.
 	queuePanel = lipgloss.Color("#181818")
 
 	queueStyle = lipgloss.NewStyle().
@@ -217,21 +191,10 @@ var (
 
 // fg writes s in the style's colour without closing the colour afterwards.
 //
-// Not a matter of taste. A lipgloss style ends every run of text with a full
-// reset, and a full reset takes the background with it, so whatever comes after on
-// the same line goes back to the terminal's own background. Every one of these
-// styles is drawn inside a box that has already set a background, and the reset was
-// quietly wiping it out for the rest of the line: invisible on a dark background,
-// and on a transparent one the desktop showing through in patches, which is the
-// worst kind of bug to look at because it moves about as the text changes.
-//
-// The reset goes back at the very end of the whole frame instead, once, in frame().
-// Nothing here needs one: each box re-states its own background for every line it
-// draws, and closeLines closes the colour at each newline.
-//
-// Empty text is a special case, because there is a caller that styles the empty
-// string. lipgloss renders that as a bare colour code with no text and no reset,
-// and the cell after it inherits a colour nobody asked for.
+// A lipgloss style ends every run of text with a full reset, and a full reset takes
+// the background with it, so whatever comes after on the same line goes back to
+// the terminal's own background. The reset goes back at the very end of the whole
+// frame instead, once, in frame().
 func fg(style lipgloss.Style, s string) string {
 	if s == "" {
 		return ""
@@ -239,23 +202,17 @@ func fg(style lipgloss.Style, s string) string {
 	return strings.TrimRight(style.Render(s), reset)
 }
 
-// Puts every attribute back to its default. Named because it appears in one place
-// as a thing being removed and in another as a thing being added, and the two have
-// to be the same string.
+// Puts every attribute back to its default.
 const reset = "\x1b[m"
 
 // A reset at the end of every line of a block of text.
 //
 // fg() leaves the colour open so a box background survives to the end of the
-// line, which works within one line. It does not work across a line, because
-// lipgloss word-wraps a block before styling it and its wrapper re-states any
-// style still open when it reaches a newline. An accent left open on the menu row
-// under the cursor was carried onto every row below it, turning the whole menu
-// purple.
+// line, which does not work across a line: lipgloss word-wraps a block before
+// styling it and its wrapper re-states any style still open at a newline.
 //
 // The reset goes before the newline rather than after, so it closes the run of
-// text rather than the padding lipgloss adds afterwards: lipgloss styles that
-// padding itself, so nothing is left unpainted.
+// text rather than the padding lipgloss adds afterwards.
 func closeLines(s string) string {
 	if !strings.Contains(s, "\x1b[") {
 		return s
@@ -272,16 +229,12 @@ func closeLines(s string) string {
 // function below ends by calling this, so no screen has to remember that the
 // title, the sidebar and the player exist.
 //
-// The errors go on here rather than on each screen because the box is cut off at
-// the bottom to keep it the size of the terminal, so anything a screen drew last is
-// the first thing cut. A screen that has run out of room to say why the music
-// stopped is exactly the screen that needs to say it most.
+// The errors go on here rather than on each screen, because the box is cut off at
+// the bottom, so anything a screen drew last is the first thing cut.
 func (m model) frame(content string) string {
 	title := titleStyle.Width(m.width).Render("  Ektara")
 
-	// Everything drawn goes through closeLines on its way into a box. This is the
-	// one place that needs to know: the leak is not in any one screen's drawing but
-	// in lipgloss's wrapping, which every box with a width set does. Doing it here
+	// Everything drawn goes through closeLines on its way into a box. Doing it here
 	// means a screen cannot forget.
 
 	panel := contentStyle.
@@ -291,9 +244,7 @@ func (m model) frame(content string) string {
 		Render(closeLines(content + m.errors()))
 
 	// The side columns are beside the content when there is room and gone when
-	// there is not, so the content always gets the width it asked for. lipgloss
-	// pads a short column out to the height of the tallest, which is what keeps
-	// the three of them level.
+	// there is not, so the content always gets the width it asked for.
 	body := panel
 	switch {
 	case m.showQueue():
@@ -323,17 +274,13 @@ func (m model) frame(content string) string {
 		Height(playerBlockHeight).
 		Render(closeLines(m.drawPlayerBar()))
 
-	// The one reset for the whole frame, at the very end. Nothing above closes its
-	// own colours, because closing them took the background with it and left the
-	// terminal showing through.
+	// The one reset for the whole frame, at the very end.
 	return lipgloss.JoinVertical(lipgloss.Left, title, body, player) + reset
 }
 
-// The menu, down the left: the same six choices as always, in the same order,
-// with the marker on the row the cursor is on.
-//
-// The cursor only moves on the menu screen, so elsewhere this is a list of where
-// you can go rather than where you are. That is why there is no marker there.
+// The menu, down the left: the six choices, with the marker on the row the cursor
+// is on. The cursor only moves on the menu screen, so elsewhere there is no
+// marker.
 func (m model) drawSidebar() string {
 
 	var b strings.Builder
@@ -353,16 +300,12 @@ func (m model) drawSidebar() string {
 	return b.String()
 }
 
-// The column on the right: what is playing now, and what plays after it.
-//
-// Always on screen when there is room, rather than only on the player screen,
-// because the whole point of a queue is being able to see it while doing something
-// else.
+// The column on the right: what is playing now, and what plays after it. Always
+// on screen when there is room.
 func (m model) drawQueue() string {
 	var b strings.Builder
 
-	// before anything has played there is nothing to queue up, so the column says
-	// so rather than showing an empty list under a heading
+	// before anything has played there is nothing to queue up
 	if len(m.queue) == 0 {
 		b.WriteString(fg(dimStyle, "UP NEXT") + "\n\n")
 		b.WriteString(fg(dimStyle, "Nothing queued."))
@@ -372,14 +315,12 @@ func (m model) drawQueue() string {
 	b.WriteString(fg(dimStyle, "NOW PLAYING") + "\n\n")
 
 	// m.index is the track playing, not the first one: a and d move it along the
-	// queue, so the row at the top follows them rather than staying on whatever was
-	// queued first
+	// queue, so the row at the top follows them
 	b.WriteString(m.queueLine(m.index, true) + "\n\n")
 
 	b.WriteString(fg(dimStyle, fmt.Sprintf("UP NEXT (%d)", len(m.queue)-1)) + "\n\n")
 
-	// the rest, with the current track kept in the middle of the window so a and d
-	// move it along with the music
+	// the rest, with the current track kept in the middle of the window
 	start, rows := queueWindow(m.queue, m.index, m.queueRows())
 	for i := range rows {
 		if start+i == m.index {
@@ -391,8 +332,7 @@ func (m model) drawQueue() string {
 	return b.String()
 }
 
-// One row of the queue column: a marker on the one playing, and the title clipped
-// so a long name cannot push the column out of shape.
+// One row of the queue column: a marker on the one playing, and the title clipped.
 func (m model) queueLine(i int, nowPlaying bool) string {
 	marker := "  "
 	if nowPlaying {
@@ -408,9 +348,7 @@ func (m model) queueLine(i int, nowPlaying bool) string {
 // The bar along the bottom. Always drawn, even with nothing playing, so the screen
 // keeps the same shape from the menu onwards.
 //
-// Also where every notice is shown, on every screen. The middle box is for the
-// screen's own contents and a failure, and a notice is the answer to a key press,
-// so it belongs somewhere always there that costs the box nothing.
+// Also where every notice is shown, on every screen.
 func (m model) drawPlayerBar() string {
 	// Clip lines to the bar's width to prevent wrapping and pushing content off-screen.
 	inside := m.width - 4 // two for the padding, two to spare
@@ -427,8 +365,7 @@ func (m model) drawPlayerBar() string {
 	}
 
 	// Before anything has played there is no track, so the bar says so rather than
-	// showing a row of zeroes. The keys are still shown, because they are how
-	// anything gets played in the first place.
+	// showing a row of zeroes.
 	if m.track.Title == "" {
 		b.WriteString("Nothing playing\n\n")
 		b.WriteString(m.drawPlayerKeys(inside) + "\n")
@@ -441,8 +378,8 @@ func (m model) drawPlayerBar() string {
 	// about the music rather than about the controls.
 	b.WriteString(m.centred(m.track.Title, inside) + "\n")
 
-	// The icon says whether sound is coming out, because the elapsed time carries on
-	// while paused and that on its own looks like a broken bar.
+	// The icon says whether sound is coming out, because the elapsed time carries
+	// on while paused and that on its own looks like a broken bar.
 	icon := "▶"
 	if m.paused {
 		icon = "❚❚"
@@ -452,14 +389,12 @@ func (m model) drawPlayerBar() string {
 	row := fmt.Sprintf("%s  %s  %s", icon, seekBar(m.elapsed, m.length, m.barWidth()), times)
 	b.WriteString(m.centred(row, inside) + "\n")
 
-	// Below the bar: the keys, then the volume and the transport buttons. Both were
-	// on the bar already in some form; they are on their own lines now so nothing
-	// has to share a row with anything else.
+	// Below the bar: the keys, then the volume and the transport buttons.
 	b.WriteString(m.drawPlayerKeys(inside) + "\n")
 	b.WriteString(m.drawTransport(inside) + "\n")
 
 	// the last line is for whatever the player has just been told, such as
-	// "volume 60%", or for the queue count when there is nothing newer
+	// "volume 60%", or the queue count when there is nothing newer
 	last := ""
 	if len(m.queue) > 1 {
 		last = fmt.Sprintf("queue: %d tracks", len(m.queue))
@@ -474,26 +409,19 @@ func (m model) drawPlayerBar() string {
 
 // The line of key hints under the progress bar.
 //
-// The text is centred first and coloured afterwards, and the order matters. A
-// lipgloss style ends with a full reset, and a full reset clears the background as
-// well as the foreground, so styling the text first left the padding spaces on
-// either side with no background at all: on a transparent terminal, the desktop
-// showing through to the left and right of the line.
+// The text is centred first and coloured afterwards, and the order matters: a
+// full reset clears the background as well as the foreground, so styling first
+// left the padding spaces with no background at all.
 func (m model) drawPlayerKeys(inside int) string {
 	return fg(dimStyle, m.centred(clip(m.keyHints(), inside), inside))
 }
 
 // The line under the keys: the volume on the left, previous and next on the right.
 //
-// The volume is a bar rather than a number, because a number has to be read and a
-// bar does not. The mute state is written out too, since the bar itself looks the
-// same whether the sound is on or off.
-//
 // The buttons name the key that presses them rather than being icons, so the row
 // explains itself and every character in it is one column wide.
 func (m model) drawTransport(inside int) string {
-	// no speaker glyph: a speaker is one of the wide emoji and takes two columns in
-	// some terminals, which would shove the row out of shape
+	// no speaker glyph: a speaker is one of the wide emoji and takes two columns
 	volume := fmt.Sprintf("vol %s %3d%%", volumeBar(m.soundVolume(), 10), int(m.volume*100+0.5))
 	if m.muted {
 		volume = fmt.Sprintf("vol %s%3d%% muted", volumeBar(0, 10), int(m.volume*100+0.5))
@@ -502,10 +430,7 @@ func (m model) drawTransport(inside int) string {
 	buttons := "prev (a)   next (d)"
 
 	// A narrow terminal has room for the volume or the buttons but not both, and
-	// the volume is the one worth keeping. The line is clipped as a whole at the
-	// end regardless, because a line that is too long wraps onto a second row and
-	// the bar is a fixed height, so the extra row would push the bottom of the
-	// screen off the terminal.
+	// the volume is the one worth keeping.
 	gap := inside - lipgloss.Width(volume) - lipgloss.Width(buttons)
 	if gap < 1 {
 		return clip(volume, inside)
@@ -516,10 +441,8 @@ func (m model) drawTransport(inside int) string {
 
 // s in the middle of a line width columns wide.
 //
-// Clips first: a line longer than the space would wrap onto a second row, and the
-// bar is a fixed height, so the extra row would push the bottom of the screen off
-// the terminal. Centring with spaces rather than lipgloss, so the result is a
-// plain string of a known width, which is what makes that checkable.
+// Clips first, and centres with spaces rather than lipgloss, so the result is a
+// plain string of a known width.
 func (m model) centred(s string, width int) string {
 	s = clip(s, width)
 
@@ -535,8 +458,7 @@ func (m model) centred(s string, width int) string {
 // A bar for the volume, so the level can be seen rather than read.
 //
 // Light and dark shades, which are one column wide in every terminal. The full
-// block is not: East Asian ambiguous, so it takes two columns in some of them and
-// would make the row longer than the screen.
+// block is not: East Asian ambiguous, so it takes two columns in some of them.
 func volumeBar(level float64, width int) string {
 	if width < 1 {
 		return ""
@@ -571,15 +493,11 @@ func (m model) barWidth() int {
 	return w
 }
 
-// The first screen: the greeting, the cover, what the highlighted choice does,
-// and a reminder of the keys. The choices themselves are in the sidebar, so they
-// are not repeated here.
+// The first screen: the greeting, the cover, and the recently played list. The
+// choices are in the sidebar, so they are not repeated here.
 func (m model) drawMenu() string {
 	var b strings.Builder
 
-	// The menu is not repeated because it is already down the left, and neither is
-	// the key hint, which the player bar carries.
-	//
 	// The greeting is clipped: one line in the pool is long enough to wrap on a
 	// narrow terminal, and a wrapped line takes a row the box did not give it.
 	b.WriteString(fg(greetingStyle, clip(m.greeting, m.contentWidth()-6)) + "\n\n")
@@ -592,14 +510,11 @@ func (m model) drawMenu() string {
 
 // The "recently played" block on the first screen: the history the program was
 // started with, newest first, cut to whatever rows are left over after the cover.
-// When there is no history it says so rather than showing a heading over nothing,
-// because a heading with nothing under it looks like something failed.
 func (m model) drawHomeRecent() string {
 	if len(m.recent) == 0 {
 		return fg(dimStyle, "Nothing played yet. Pick Download or Offline to start.")
 	}
 
-	// the heading, a blank line under it, and one row per track
 	rows := m.drawRows() - m.menuArtRows() - 3
 	if rows < 1 {
 		return ""
@@ -608,7 +523,6 @@ func (m model) drawHomeRecent() string {
 	var b strings.Builder
 	b.WriteString(fg(titleTextStyle, "RECENTLY PLAYED") + "\n")
 
-	// the newest first, and never more than there is room for
 	n := len(m.recent)
 	if n > rows {
 		n = rows
@@ -631,10 +545,6 @@ func (m model) drawHomeRecent() string {
 // blanks, and one for the gap before the next thing.
 //
 // Capped at half the box, because the other half is the recently played list.
-//
-// A small number is left as it is rather than rounded up, because on a short
-// terminal there is genuinely no room. artWidthFor turns a number too small to use
-// into no cover at all.
 func (m model) menuArtRows() int {
 	rows := m.artRows() - 4
 
@@ -650,13 +560,8 @@ func (m model) menuArtRows() int {
 // How many rows there are to draw a cover in, before anything else in the box has
 // taken its share.
 //
-// Deliberately not drawRows, which is the same thing but also counts a notice:
-// notices come from every key press, so counting one would change the width of the
-// cover every time the volume moved, and the cover would blink out until the
-// notice expired. A failure is different, because it stays until something
-// replaces it, so the cover resizing once when one arrives is not a flicker. The
-// result is that the cover only changes size when the terminal does or when
-// something has genuinely broken, and never because a key was pressed.
+// Deliberately not drawRows, which also counts a notice: notices come from every
+// key press, so counting one would resize the cover every time the volume moved.
 func (m model) artRows() int {
 	rows := m.bodyHeight() - 2 - m.errorRows()
 	if rows < 1 {
@@ -667,10 +572,8 @@ func (m model) artRows() int {
 
 // Turns the rows the art is allowed into the width to draw it at.
 //
-// A thumbnail is 16:9, so on screen it is wider than it is tall and the rows it is
-// given decide the width. The ratio lives in the asciiart package, which is where
-// the picture is cropped and drawn: keeping the arithmetic here and the shape
-// there in step by hand is how the two drift apart.
+// A thumbnail is 16:9, so on screen it is wider than it is tall. The ratio lives
+// in the asciiart package, which is where the picture is cropped and drawn.
 func artWidthFor(rows, contentWidth int) int {
 	w := asciiart.WidthFor(rows)
 
@@ -689,11 +592,7 @@ func artWidthFor(rows, contentWidth int) int {
 }
 
 // The command that fetches and draws the cover for the track playing now, at the
-// size the screen wants it. Asked for whenever the track or the terminal changes,
-// and it does nothing if the drawing already exists.
-//
-// Lives here rather than in art.go because the width is a drawing decision: the
-// art is only worth fetching at the size it is going to be shown at.
+// size the screen wants it. Asked for whenever the track or the terminal changes.
 func (m model) wantArt() tea.Cmd {
 	if m.track.ID == "" {
 		return nil
@@ -703,10 +602,6 @@ func (m model) wantArt() tea.Cmd {
 
 // The width the cover should be drawn at on the current screen: the player screen
 // gives it half the box, the menu screen the lot of it.
-//
-// The player screen is where the cover belongs, being the screen with a track on
-// it. The menu screen shows the fallback picture, because there is nothing playing
-// to have a cover of.
 func (m model) artWidth() int {
 	if m.mode == modePlaying {
 		return artWidthFor(m.playerArtRows(), m.contentWidth())
@@ -715,16 +610,14 @@ func (m model) artWidth() int {
 }
 
 // The fallback cover, kept in the binary so the first screen has a picture to show
-// before anything is playing and there is nothing to fetch one for. Once a track is
-// playing its own thumbnail is used instead.
+// before anything is playing.
 //
 //go:embed assets/cover.jpg
 var coverJPG []byte
 
 // The drawn fallback, one copy per width it has been drawn at. The screen is
 // redrawn ten times a second and each redraw would otherwise turn the picture into
-// text all over again. The width is the only thing that changes it, so a handful of
-// widths is a handful of copies and no more.
+// text all over again.
 var cover = struct {
 	sync.Mutex
 	byWidth map[int]string
@@ -732,9 +625,6 @@ var cover = struct {
 
 // The fallback cover drawn to the given width, or nothing at all when there is no
 // room for one.
-//
-// A width below eight returns the empty string, which is the drawing saying there
-// is no space rather than an error.
 func coverArt(width int) string {
 	if width < 8 {
 		return ""
@@ -768,9 +658,8 @@ func coverArt(width int) string {
 // The cover of the track playing, drawn as text, or the empty string if it has not
 // arrived yet.
 //
-// Only shown when it was drawn for this track at this width, which is what the key
-// on the model is for. A drawing that was on its way when the track changed is not
-// shown against the new one.
+// Only shown when it was drawn for this track at this width, so a drawing that was
+// on its way when the track changed is not shown against the new one.
 func (m model) trackArt() string {
 	if m.art == "" {
 		return ""
@@ -793,8 +682,7 @@ func (m model) drawSearch() string {
 	b.WriteString(fg(titleTextStyle, prompt) + "\n\n")
 	b.WriteString("  " + fg(cursorStyle, m.searchInput) + "▌\n\n")
 
-	// while the search is out, show that something is happening. The four frames are
-	// plain characters, so this looks the same in every font.
+	// while the search is out, show that something is happening
 	if m.searching {
 		b.WriteString("  " + spinFrame(m.spin) + " Searching...\n")
 	} else {
@@ -804,7 +692,7 @@ func (m model) drawSearch() string {
 	return m.frame(b.String())
 }
 
-// The busy animation. Spinning through four characters is the whole trick.
+// The busy animation.
 var spinFrames = []string{"|", "/", "-", "\\"}
 
 // The frame for a given tick count. The remainder keeps it inside the list, so the
@@ -831,17 +719,14 @@ func (m model) drawItems() string {
 	b.WriteString(fg(titleTextStyle, m.itemsTitle()) + "\n\n")
 
 	// Only the rows near the cursor are drawn. The history can be hundreds of songs
-	// long, and drawing all of them pushes the rest of the screen off the bottom,
-	// so the list scrolls instead.
+	// long, so the list scrolls instead.
 	start, count := listWindow(len(m.items), m.itemCursor, m.listRows())
 
 	for i := 0; i < count; i++ {
 		it := m.items[start+i]
 
-		// Clipped before it is coloured, never after: clip counts columns and the
-		// colour codes are not columns, so clipping a coloured string cuts through
-		// the middle of an escape sequence and leaves the rest of the line with no
-		// colour at all.
+		// Clipped before it is coloured, never after: clipping a coloured string
+		// cuts through the middle of an escape sequence.
 		title := clip(it.title, m.contentWidth()-6)
 
 		marker := "  "
@@ -855,10 +740,8 @@ func (m model) drawItems() string {
 	// A count, so it is obvious the list continues past the bottom. Only shown when
 	// there is more than fits, because "1 of 1" is just noise.
 	//
-	// The blank line is written outside the colour. A styled string that starts with
-	// a newline puts its colour code at the end of the line above, where lipgloss
-	// splits the line in two and leaves the code behind on a row with no background
-	// of its own.
+	// The blank line is written outside the colour: a styled string that starts
+	// with a newline puts its colour code at the end of the line above.
 	if len(m.items) > count {
 		b.WriteString("\n")
 		b.WriteString(fg(dimStyle, fmt.Sprintf("  showing %d-%d of %d",
@@ -872,11 +755,10 @@ func (m model) drawItems() string {
 
 // How many list rows fit. The box spends five lines on the padding, the heading,
 // the blank line under it, the blank line above the key hint and the hint itself,
-// and two more on the count, which is always allowed for so the list does not
-// change height as it scrolls.
+// and two more on the count.
 //
 // The floor is one rather than three, because on a short terminal the box itself
-// may only have a line or two, and claiming three would draw past the bottom.
+// may only have a line or two.
 func (m model) listRows() int {
 	n := m.drawRows() - 7
 	if n < 1 {
@@ -889,14 +771,13 @@ func (m model) listRows() int {
 //
 // total is how many rows there are, cursor which one is highlighted, max how many
 // fit. Returns the index of the first row drawn and how many rows are in the
-// window, which is all the caller needs to work out which row it is looking at.
+// window.
 func listWindow(total, cursor, max int) (start, rows int) {
 	if total <= max {
 		return 0, total
 	}
 
-	// start half a screen above the cursor, so it sits near the middle with room to
-	// scroll in both directions
+	// start half a screen above the cursor, so it sits near the middle
 	start = cursor - max/2
 	if start < 0 {
 		start = 0
@@ -910,8 +791,8 @@ func listWindow(total, cursor, max int) (start, rows int) {
 // The full screen for a track that is playing. The bar along the bottom says the
 // same thing in fewer lines, so this is where the cover goes.
 func (m model) drawPlayer() string {
-	// the loading screen is a different box, not the player box with a gap in it,
-	// so a slow track says plainly that it is still starting
+	// the loading screen is a different box, so a slow track says plainly that it
+	// is still starting
 	if m.loading {
 		var b strings.Builder
 		b.WriteString(fg(titleTextStyle, "Loading "+m.track.Title) + "\n\n")
@@ -919,17 +800,17 @@ func (m model) drawPlayer() string {
 	}
 
 	// This screen is the cover and where the track came from. The keys, the volume
-	// and the transport are on the bar along the bottom on every screen, and the
-	// queue is in the column on the right on every screen, so repeating either here
-	// would be saying the same thing twice in one glance.
+	// and the transport are on the bar along the bottom, and the queue is in the
+	// column on the right.
 	//
 	// The picture arrives from the network a moment after the track does, so this
 	// is usually an empty gap for the first second. Nothing is shown in that gap
-	// rather than the fallback picture: putting the fallback next to a real song
-	// would say the wrong thing about which song it is.
+	// rather than the fallback picture: the fallback next to a real song would say
+	// the wrong thing about which song it is.
 	var b strings.Builder
 
-	b.WriteString(fg(titleTextStyle, "♪ "+m.track.Title) + "\n")
+	b.WriteString(fg(titleTextStyle, "♪ "+m.track.name()) + "\n")
+	b.WriteString(fg(dimStyle, clip(m.metaLine(), m.contentWidth()-6)) + "\n")
 	b.WriteString(fg(dimStyle, clip(m.subtitle(), m.contentWidth()-6)) + "\n\n")
 
 	b.WriteString(m.trackArt() + "\n\n")
@@ -939,19 +820,11 @@ func (m model) drawPlayer() string {
 
 // How many rows of cover the player screen has left.
 //
-// Four lines are spoken for before the art: the title, the link under it, and the
-// two blank lines. The art then takes what is left, capped at half the box so it
-// does not become a wall of dots on a tall terminal.
-//
-// The queue is not in that count, because the queue is not on this screen: it is
-// in the column on the right. A notice is not in it either, for the reason
-// artRows gives.
-//
-// A small number is left as it is rather than rounded up, because on a short
-// terminal there is genuinely no room. artWidthFor turns a number too small to use
-// into no cover at all.
+// Five lines are spoken for before the art: the title, the details, the link
+// under it, and the two blank lines. The art then takes what is left, capped at
+// half the box so it does not become a wall of dots on a tall terminal.
 func (m model) playerArtRows() int {
-	rows := m.artRows() - 4
+	rows := m.artRows() - 5
 
 	if half := m.artRows() / 2; rows > half {
 		rows = half // the picture is never more than half the screen
@@ -965,9 +838,9 @@ func (m model) playerArtRows() int {
 // How many lines the queue column spends on the tracks still to come: a heading, a
 // blank line, and the tracks themselves.
 //
-// Zero when there is nothing queued, which is when the column says so in one line
-// instead. At most five tracks however long the queue is, because a column that
-// runs the height of the screen is not a list any more.
+// Zero when there is nothing queued, and at most five tracks however long the
+// queue is, because a column that runs the height of the screen is not a list any
+// more.
 func (m model) queueRows() int {
 	if len(m.queue) <= 1 {
 		return 0
@@ -980,10 +853,7 @@ func (m model) queueRows() int {
 }
 
 // Whatever has gone wrong and is still true: the last failure, which stays until
-// something replaces it.
-//
-// The frame puts this on the bottom of the middle box, so every screen says it in
-// the same place. A notice is not here; that goes in the player bar.
+// something replaces it. The frame puts this on the bottom of the middle box.
 func (m model) errors() string {
 	if m.lastError == "" {
 		return ""
@@ -994,10 +864,8 @@ func (m model) errors() string {
 // How many lines errors() will draw: a blank line and the message, so two, or
 // none when there is nothing to say.
 //
-// Only a failure is counted. A notice goes in the player bar, which is on screen
-// whatever the mode is, so it costs the middle box nothing. Not only tidier: the
-// notices come from every key press, and if one took two rows out of the box the
-// cover would change size every time the volume moved.
+// Only a failure is counted. A notice goes in the player bar, so it costs the
+// middle box nothing and the cover does not change size on every key press.
 func (m model) errorRows() int {
 	if m.lastError == "" {
 		return 0
@@ -1006,7 +874,7 @@ func (m model) errorRows() int {
 }
 
 // The second line of the player: the youtube link for a stream, and the file it
-// came from for a local mp3, which has no link.
+// came from for a local mp3.
 func (m model) subtitle() string {
 	if m.track.Stream {
 		return m.track.PageURL
@@ -1014,20 +882,35 @@ func (m model) subtitle() string {
 	return m.track.Filename
 }
 
+// The line under the title: who made it, what it is on, what it sounds like.
+//
+// Drawn whether there is anything to say or not, because the line takes up the
+// same room either way and the cover must not change size when the answer
+// arrives.
+func (m model) metaLine() string {
+	bits := []string{}
+	if m.track.Artist != "" {
+		bits = append(bits, m.track.Artist)
+	}
+	if m.track.Album != "" {
+		bits = append(bits, m.track.Album)
+	}
+	if len(m.track.Genres) > 0 {
+		bits = append(bits, strings.Join(m.track.Genres, ", "))
+	}
+	return strings.Join(bits, " · ")
+}
+
 // The line of keys under the progress bar.
 //
-// The volume is not in here: the line below has a volume bar on it, so saying the
-// number again would be saying it twice. s and r do show their state, because a key
-// that does nothing visible is a key nobody presses twice.
-//
-// One line and not two, because the bar is a fixed height and a second line here
-// would push the bottom of the screen off the terminal.
+// The volume is not in here: the line below has a volume bar on it. s and r do
+// show their state, because a key that does nothing visible is a key nobody
+// presses twice.
 func (m model) keyHints() string {
 	return fmt.Sprintf("← → seek   a prev   d next   p pause   s shuffle %s   r repeat %s   q back",
 		onOff(m.opts.shuffle), onOff(m.opts.repeat))
 }
 
-// Tracks to rows for a list screen.
 func tracksToItems(tracks []Track) []item {
 	items := make([]item, 0, len(tracks))
 	for _, t := range tracks {
@@ -1039,8 +922,7 @@ func tracksToItems(tracks []Track) []item {
 // A line of text picked to suit the hour, so the first screen says something that
 // is not the same all day.
 //
-// Called once, when the model is built, and the answer kept on the model. Calling
-// it while drawing would give a new line every frame, flickering too fast to read.
+// Called once, when the model is built, and the answer kept on the model.
 func timeMsg() string {
 	return timeMsgFor(time.Now().Hour())
 }
@@ -1052,8 +934,7 @@ func timeMsgFor(hour int) string {
 }
 
 // Every line that suits a given hour, so a test can check a greeting belongs to
-// the hour it was meant for. The bands: small hours, morning, midday, afternoon,
-// evening, rest of the night.
+// the hour it was meant for.
 func greetingPool(hour int) []string {
 	switch {
 	case hour < 5:
@@ -1130,8 +1011,7 @@ func clock(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", seconds/60, seconds%60)
 }
 
-// Whether a switch is on, in as few characters as possible: the key hints have to
-// fit on one line.
+// Whether a switch is on, in as few characters as possible.
 func onOff(b bool) string {
 	if b {
 		return "on"
@@ -1140,7 +1020,7 @@ func onOff(b bool) string {
 }
 
 // Marks the volume as silent, because the volume number stays where it was while
-// mute is on, so the number alone would say otherwise.
+// mute is on.
 func muted(b bool) string {
 	if b {
 		return " (muted)"
@@ -1151,10 +1031,6 @@ func muted(b bool) string {
 // The progress bar, with a pacman at the playback position. The pacman opens and
 // closes its mouth as it goes, which is what makes the movement easy to follow
 // while the track plays.
-//
-// The two mouth shapes are Canadian aboriginal syllabics, which most terminal
-// fonts carry. A terminal without them shows a box instead, a poor look but not a
-// broken one.
 func seekBar(elapsed, length time.Duration, width int) string {
 	// how far through, as a fraction between 0 and 1
 	done := 0.0
@@ -1193,7 +1069,7 @@ func seekBar(elapsed, length time.Duration, width int) string {
 }
 
 // The part of the queue to show, at most max entries, with the track playing kept
-// inside it so a and d move the list with the music.
+// inside it.
 func queueWindow(queue []Track, index, max int) (start int, rows []Track) {
 	if len(queue) <= max {
 		return 0, queue
@@ -1208,12 +1084,10 @@ func queueWindow(queue []Track, index, max int) (start int, rows []Track) {
 	return start, queue[start : start+max]
 }
 
-// Shortens s until it is n columns wide, ending in an ellipsis when it had to cut,
-// so a long title cannot push the box out of shape.
+// Shortens s until it is n columns wide, ending in an ellipsis when it had to cut.
 //
 // Counts columns rather than letters, because lipgloss does too: a CJK or emoji
-// rune takes two columns, and counting it as one is what makes a box with a
-// Japanese title in it look broken.
+// rune takes two columns.
 func clip(s string, n int) string {
 	if lipgloss.Width(s) <= n {
 		return s

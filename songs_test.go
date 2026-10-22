@@ -22,7 +22,8 @@ func songDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(`
 	CREATE TABLE songs(
 		seq INTEGER PRIMARY KEY AUTOINCREMENT,
-		id TEXT, name TEXT NOT NULL, url TEXT, title TEXT
+		id TEXT, name TEXT NOT NULL, url TEXT, title TEXT,
+		artist TEXT, album TEXT, song TEXT, genres TEXT, duration INTEGER
 	)`); err != nil {
 		t.Fatalf("create songs table: %v", err)
 	}

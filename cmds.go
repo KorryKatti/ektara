@@ -18,12 +18,14 @@ func tick() tea.Cmd {
 	})
 }
 
-// Opening a local file is quick, but opening a stream asks yt-dlp to resolve a
-// media url first, which takes seconds, so this happens off the display's
-// goroutine.
+// Opens a track. A stream asks yt-dlp to resolve a media url first, so it takes
+// seconds and happens off the display's goroutine.
+//
+// The track comes back with whatever was learned about it on the way.
 func openTrackCmd(a audio, t Track) tea.Cmd {
 	return func() tea.Msg {
-		return trackOpenedMsg{err: openTrack(a, t)}
+		track, err := openTrack(a, t)
+		return trackOpenedMsg{err: err, track: track}
 	}
 }
 
@@ -34,8 +36,8 @@ func searchCmd(db *sql.DB, query string) tea.Cmd {
 	}
 }
 
-// Read in the background, so the first screen has something real on it rather
-// than made up entries.
+// Reads the history in the background, so the first screen has something real on
+// it rather than made up entries.
 func recentCmd(db *sql.DB) tea.Cmd {
 	return func() tea.Msg {
 		tracks, err := historyTracks(db)

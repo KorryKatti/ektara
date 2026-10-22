@@ -1,8 +1,7 @@
 package main
 
-// The keys: every key press, and which screen it belongs to. Nothing here draws
-// or plays anything. A handler changes the model and returns the command that
-// should follow from it.
+// The keys: every key press, and which screen it belongs to. A handler changes
+// the model and returns the command that should follow from it.
 
 import (
 	"fmt"
@@ -15,8 +14,7 @@ import (
 // The front door for keys: ctrl+c for every screen, then the rest to whichever
 // screen is showing.
 func (m model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// ctrl+c always quits, because a key that only quits from one screen would
-	// trap the user on any other.
+	// ctrl+c always quits, so no screen can trap the user.
 	if msg.String() == "ctrl+c" {
 		return m.quit()
 	}
@@ -57,8 +55,7 @@ func (m model) onMenuKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.menuCursor++
 		}
 
-	// Typing the number jumps straight to that row, so "3" is a shortcut for
-	// moving down twice and pressing enter.
+	// Typing the number jumps straight to that row.
 	case "1", "2", "3", "4", "5":
 		m.menuCursor = int(msg.String()[0] - '1')
 		return m.startMenuChoice()
@@ -70,16 +67,13 @@ func (m model) onMenuKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// Acts on whichever menu row the cursor is on.
 func (m model) startMenuChoice() (tea.Model, tea.Cmd) {
 	switch m.menuCursor {
 
 	case menuQuit:
 		return m.quit()
 
-	// "Online" and "Stream" both start by asking for a name to look up. Which one
-	// it was is remembered, because picking a result has to know whether to save
-	// it or stream it.
+	// "Online" and "Stream" both start by asking for a name to look up.
 	case menuOnline, menuStream:
 		m.mode = modeSearch
 		m.searchInput = ""
@@ -131,16 +125,14 @@ func (m model) startMenuChoice() (tea.Model, tea.Cmd) {
 func (m model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		// Leaving while a search is out cancels its result: onSearched only acts
-		// when searching is still true, so a late answer cannot yank the user back
-		// to a screen they walked away from.
+		// Leaving while a search is out cancels its result, so a late answer cannot
+		// yank the user back to a screen they walked away from.
 		m.searching = false
 		m.mode = modeMenu
 		return m, nil
 
 	case "enter":
-		// One search at a time: a second enter while the first is out would start
-		// a duplicate request.
+		// One search at a time: a second enter would start a duplicate request.
 		if m.searching {
 			return m, nil
 		}
@@ -151,8 +143,6 @@ func (m model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Searching takes a network round trip, so it happens in the background.
-		// searching is set so the screen shows an animation instead of looking
-		// stuck.
 		m.searching = true
 		return m, searchCmd(m.db, m.searchInput)
 
@@ -163,8 +153,7 @@ func (m model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Anything else that is a plain character gets typed into the box, which is
-	// ignored while searching because the box is no longer the focus.
+	// Anything else that is a plain character gets typed into the box.
 	if !m.searching && len(msg.Key().Text) > 0 {
 		m.searchInput += msg.Key().Text
 	}
@@ -191,7 +180,6 @@ func (m model) startQueue() (tea.Model, tea.Cmd) {
 	if !m.rolling {
 		m.queue = nil
 	}
-	//m.queue = nil
 	m.mode = modeMenu
 	m.menuCursor = 0
 	return m, nil
@@ -348,9 +336,7 @@ func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return next, cmd
 }
 
-// What to hand the player: zero while muted, otherwise the volume. The volume
-// number stays where it was while muted, which is what makes unmuting give back
-// the level that was set rather than silence.
+// What to hand the player: zero while muted, otherwise the volume.
 func (m model) soundVolume() float64 {
 	if m.muted {
 		return 0

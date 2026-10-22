@@ -111,7 +111,7 @@ func TestStreamURLResolvesAndPlays(t *testing.T) {
 	// available, which is what a test wants from the internet.
 	const pageURL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
-	url, err := streamURL(pageURL)
+	url, meta, err := streamURL(pageURL)
 	if err != nil {
 		t.Fatalf("streamURL: %v", err)
 	}
@@ -119,6 +119,8 @@ func TestStreamURLResolvesAndPlays(t *testing.T) {
 		t.Fatal("streamURL returned nothing")
 	}
 	t.Logf("resolved to %s...", url[:min(len(url), 60)])
+	t.Logf("metadata: artist=%q album=%q genres=%v duration=%s",
+		meta.Artist, meta.Album, meta.Genres, meta.Duration)
 
 	audio, err := newPlayer()
 	if err != nil {

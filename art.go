@@ -1,16 +1,6 @@
 package main
 
-// Cover art: getting the picture for whatever is playing, and turning it into
-// text.
-//
-// The picture is the YouTube thumbnail, whose address is a fixed pattern with the
-// video id dropped in (see thumbnailURL in player.go). Nothing is stored about it
-// and nothing is looked up: the address is built, fetched, drawn, thrown away.
-//
-// Drawing is the slow part and it is done over and over, because the screen is
-// redrawn ten times a second and the art changes size when the terminal does. So a
-// finished drawing is kept, keyed by track and width, and the same one handed back
-// next time: a track played before is drawn once per width rather than per frame.
+// Cover art: fetching the picture for whatever is playing and turning it into text.
 
 import (
 	"context"
@@ -24,49 +14,36 @@ import (
 	"ektara/asciiart"
 )
 
-// How long a thumbnail has to arrive. A slower picture is not worth waiting for:
-// the screen does without it rather than showing an empty box, and a fresh attempt
-// goes out the next time the track comes round.
+// How long a thumbnail has to arrive before the screen gives up on it.
 const artTimeout = 5 * time.Second
 
-// A drawing finished and is ready to be shown. The key is the track and width it
-// was drawn for, so an answer arriving after the user has moved on can be thrown
-// away instead of shown against the wrong track.
+// A finished drawing, with the track and width it was drawn for.
 type artMsg struct {
 	key string
 	art string
 }
 
-// The finished drawings. The lock is because fetching happens on other goroutines
-// while the screen is drawn, and a map written from two of them at once is a crash
-// rather than a wrong picture.
+// Finished drawings, keyed by track and width. Locked because fetching happens on
+// other goroutines while the screen is drawn.
 var artCache = struct {
 	sync.Mutex
 	byKey map[string]string
 }{byKey: map[string]string{}}
 
-// Names one drawing: this track at this width. The width is in the key because
-// the same track drawn at two sizes is two drawings.
+// Names one drawing: this track at this width.
 func artKey(t Track, width int) string {
 	return t.ID + "/" + strconv.Itoa(width)
 }
 
-// A drawing that is already done, or "" if there is not one yet. Never fetches
-// anything, so it is safe to call while drawing the screen.
+// A drawing that is already done, or "" if there is not one yet.
 func cachedArt(key string) string {
 	artCache.Lock()
 	defer artCache.Unlock()
 	return artCache.byKey[key]
 }
 
-// Goes off to fetch and draw a track's picture, then sends back the result.
-//
-// A command rather than something done while drawing because it waits on the
-// network. Drawing happens ten times a second on the one goroutine that owns the
-// screen, so a download there would freeze the program for as long as it took.
-//
-// A width below eight means no room for a picture: nothing is sent, nothing
-// fetched.
+// Fetches and draws a track's picture in the background. A width below eight means
+// no room for a picture, so nothing is sent and nothing is fetched.
 func artCmd(t Track, width int) tea.Cmd {
 	if width < 8 {
 		return nil
@@ -74,15 +51,14 @@ func artCmd(t Track, width int) tea.Cmd {
 
 	key := artKey(t, width)
 
-	// already drawn, or already on its way: asking again would fetch the same
-	// picture over and over for as long as the track played
+	// Already drawn, or already on its way.
 	if cachedArt(key) != "" {
 		return nil
 	}
 
 	url := thumbnailURL(t.ID)
 	if url == "" {
-		return nil // a local mp3 has no thumbnail, and there is nothing to fall back to
+		return nil // a local mp3 has no thumbnail
 	}
 
 	return func() tea.Msg {
@@ -97,8 +73,7 @@ func artCmd(t Track, width int) tea.Cmd {
 			Background: contentPanel,
 		})
 		if err != nil {
-			// a missing thumbnail is not worth interrupting anything for, and
-			// nothing is said on screen: the box is simply left empty
+			// A missing thumbnail is not worth interrupting anything for.
 			log.Printf("cover for %s: %v", t.ID, err)
 			return nil
 		}
@@ -111,12 +86,7 @@ func artCmd(t Track, width int) tea.Cmd {
 	}
 }
 
-// Takes the answer to a fetch.
-//
-// A drawing for a track that is no longer playing, or at a width the screen has
-// moved on from, is dropped: it would be shown against the wrong song. The key is
-// stored alongside the drawing so the screen can check it again later without
-// remembering what it asked for.
+// Takes the answer to a fetch, dropping it if the track or width has moved on.
 func (m model) onArt(msg artMsg) (tea.Model, tea.Cmd) {
 	want := artKey(m.track, m.artWidth())
 	if msg.key != want {

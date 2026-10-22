@@ -1,7 +1,7 @@
 package main
 
-// A tiny model of what a terminal does with colour codes, so a test can walk a
-// line the way the terminal walks it and see which cells are actually painted.
+// A small model of what a terminal does with colour codes, so a test can see which
+// cells are actually painted.
 
 import "strings"
 
@@ -13,11 +13,9 @@ type sgrState struct {
 
 // Reads one escape sequence's worth of codes and returns the new state.
 //
-// Every number is a separate instruction. 38 and 48 introduce a colour and are
-// followed by arguments that are not instructions: "5;n" is two numbers and
-// "2;r;g;b" is five. A sequence setting only a foreground says nothing about the
-// background, which is why a coloured run mid-line leaves the background under it
-// alone.
+// 38 and 48 introduce a colour and take arguments that are not instructions, so
+// they are consumed whole. A sequence setting only a foreground leaves the
+// background alone.
 func (s sgrState) apply(codes string) sgrState {
 	if codes == "" {
 		return sgrState{} // a bare reset puts everything back to the default
@@ -65,7 +63,4 @@ func (s sgrState) apply(codes string) sgrState {
 	return s
 }
 
-// Whether a cell written right now would have a colour of its own. A cell with
-// no background shows the terminal's own, which on a transparent terminal is
-// the desktop.
 func (s sgrState) hasBackground() bool { return s.bg != "" }
