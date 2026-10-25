@@ -4,6 +4,7 @@ package main
 // background and hands back a message.
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"time"
@@ -57,5 +58,39 @@ func downloadCmd(id, title string, forQueue bool) tea.Cmd {
 	return func() tea.Msg {
 		track, err := downloadVideo(id, title)
 		return downloadedMsg{track: track, err: err, forQueue: forQueue}
+	}
+}
+
+// Fetches lyrics with retries, caches found results (including no lyrics), and retries failures later
+func lyricsCmd(db *sql.DB, t Track) tea.Cmd {
+	return func() tea.Msg {
+		msg := lyricsMsg{forTrack: lyricsKey(t)}
+		if db != nil {
+			if remembered, ok := cachedLyrics(db, t.ID); ok {
+				msg.lyrics = remembered
+				return msg
+			}
+		}
+		var lastErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			time.Sleep(time.Duration(attempt) * time.Second)
+
+			records, err := searchLyrics(context.TODO(), lyricQueryFromTrack(t))
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			found, ok := pickRecord(records, t.Artist, t.Duration)
+			if ok {
+				msg.lyrics = found.asLyrics()
+			}
+			// Cache valid responses even when no lyrics are found
+			if db != nil {
+				storeLyrics(db, t, msg.lyrics)
+			}
+			return msg
+		}
+		msg.err = lastErr
+		return msg
 	}
 }

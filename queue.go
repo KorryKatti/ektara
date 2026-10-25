@@ -58,6 +58,12 @@ func (m *model) startTrack() tea.Cmd {
 	m.art = ""
 	m.artKey = artKey(m.track, m.artWidth())
 
+	// Fetch lyrics in advance and reset them when the track changes
+	m.lyrics = lyrics{}
+	m.lyricsLoading = true
+	m.lyricsFailed = false
+	m.lyricsFor = lyricsKey(m.track)
+
 	// No tick here. onTick batches one of its own onto whatever this returns, so
 	// the chain Init started keeps being renewed; starting a second one here would
 	// make the display repaint twice as fast for the rest of the session.
@@ -65,6 +71,7 @@ func (m *model) startTrack() tea.Cmd {
 		openTrackCmd(m.player, m.track),
 		m.presence.showCmd(m.track, m.startTime),
 		artCmd(m.track, m.artWidth()),
+		lyricsCmd(m.db, m.track),
 	)
 }
 
@@ -74,6 +81,22 @@ func (m *model) stopTrack() {
 	if m.player != nil {
 		m.player.Stop()
 	}
+}
+
+// Apply lyrics only if the track hasn't changed
+func (m model) onLyrics(msg lyricsMsg) (tea.Model, tea.Cmd) {
+	if msg.forTrack != m.lyricsFor {
+		return m, nil
+	}
+	m.lyricsLoading = false
+	if msg.err != nil {
+		log.Printf("lyrics %s: %v", m.track.label(), msg.err)
+		m.lyrics = lyrics{}
+		m.lyricsFailed = true
+		return m, nil
+	}
+	m.lyrics = msg.lyrics
+	return m, nil
 }
 
 func (m model) move(delta int) (tea.Model, tea.Cmd) {

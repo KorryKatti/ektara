@@ -92,6 +92,14 @@ type recentMsg struct {
 	tracks []Track
 }
 
+// the words for a track , or the news that lrclib could not be reached
+type lyricsMsg struct {
+	// Prevents late lyrics from appearing on the wrong track
+	forTrack string
+	lyrics   lyrics
+	err      error
+}
+
 // Everything the program remembers.
 type model struct {
 	db   *sql.DB
@@ -174,6 +182,12 @@ type model struct {
 	// song.
 	art    string
 	artKey string
+
+	// Tracks which song the lyrics belong to and whether lookup failed
+	lyrics        lyrics
+	lyricsFor     string
+	lyricsLoading bool
+	lyricsFailed  bool
 
 	// A pointer because there is one for the session, and it carries its own lock.
 	presence *presence
@@ -264,6 +278,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case artMsg:
 		return m.onArt(msg)
+
+	case lyricsMsg:
+		return m.onLyrics(msg)
 
 	case tea.KeyPressMsg:
 		return m.onKey(msg)

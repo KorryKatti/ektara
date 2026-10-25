@@ -346,3 +346,8 @@ func storeLyrics(db *sql.DB, t Track, found lyrics) {
 		log.Printf("cache lyrics %s: %v", t.label(), err)
 	}
 }
+
+// Identifies the track by video ID or local file name to reject stale lyrics
+func lyricsKey(t Track) string {
+	return t.ID + "|" + t.Filename
+}
