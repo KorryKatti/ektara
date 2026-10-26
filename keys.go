@@ -35,6 +35,8 @@ func (m model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.onListKey(msg)
 	case modePlaying:
 		return m.onPlayerKey(msg)
+	case modeLyrics:
+		return m.onLyricsKey(msg)
 	}
 
 	return m, nil
@@ -244,6 +246,13 @@ func (m model) onListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // Handle music keys on any screen, pass other keys through, and ignore music keys until a track is loaded
 func (m model) transportKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+
+	// Keeps lyrics visible while the audio is loading
+	if msg.String() == "l" {
+		next, cmd := m.toggleLyrics()
+		return next, cmd, true
+	}
+
 	if m.loading {
 		return m, nil, false
 	}
@@ -326,6 +335,31 @@ func (m model) transportKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
+// Toggles lyrics and returns to the previous screen when closed
+func (m model) toggleLyrics() (tea.Model, tea.Cmd) {
+	if m.mode == modeLyrics {
+		m.mode = m.lyricsFrom
+		return m, nil
+	}
+	if m.track.Title == "" {
+		m.say("nothing playing")
+		// you couldn't tell her that you lost them
+		return m, nil
+	}
+	m.lyricsFrom = m.mode
+	m.mode = modeLyrics
+	return m, nil
+}
+
+// Handles leaving the lyrics screen; transport keys are handled earlier
+func (m model) onLyricsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		return m.toggleLyrics()
+	}
+	return m, nil
+}
+
 func (m model) onPlayerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
@@ -345,6 +379,7 @@ func (m model) soundVolume() float64 {
 	return m.volume
 }
 
+// cause you're scared and you are not talking
 func clampVolume(v float64) float64 {
 	if v < 0 {
 		return 0

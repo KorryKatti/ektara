@@ -1099,3 +1099,83 @@ func clip(s string, n int) string {
 	}
 	return string(runes) + "…"
 }
+
+// Highlights and centres the current lyric line; untimed lyrics appear as plain text
+func (m model) drawLyrics() string {
+	var b strings.Builder
+	b.WriteString(fg(titleTextStyle, "Lyrics") + "\n\n")
+	switch {
+	case m.lyricsLoading:
+		b.WriteString("	" + spinFrame(m.spin) + fg(dimStyle, " looking for lyrics...") + "\n")
+	case m.lyricsFailed:
+		b.WriteString(fg(dimStyle, "	could not reach lrclib.net") + "\n")
+	case m.lyrics.Instrumental:
+		b.WriteString(fg(dimStyle, "	instrumental track mate, whatchu looking for") + "\n")
+	case len(m.lyrics.Synced) > 0:
+		b.WriteString(m.syncedLines() + "\n")
+	case strings.TrimSpace(m.lyrics.Plain) != "":
+		b.WriteString(m.plainLines() + "\n")
+	default:
+		// looked up and got nothing , answer = none
+		b.WriteString(fg(dimStyle, "	no lyrics for this track") + "\n")
+
+	}
+	b.WriteString("\n" + fg(dimStyle, "l or esc back") + "\n")
+	return m.frame(b.String())
+}
+
+// tbh didnt wanna implement current lyrics but might as well
+// timed lines with the one being sung picke dout
+func (m model) syncedLines() string {
+	var b strings.Builder
+	at := m.lyricAt()
+	cursor := at
+	if cursor < 0 {
+		cursor = 0
+	}
+	start, count := listWindow(len(m.lyrics.Synced), cursor, m.lyricsRows())
+	for i := 0; i < count; i++ {
+		n := start + 1
+		text := clip(m.lyrics.Synced[n].Text, m.contentWidth()-6)
+		if n == at {
+			b.WriteString(fg(cursorStyle, "> "+text) + "\n")
+			continue
+			// her love in your head , you lost her earrings in her bed
+		}
+		b.WriteString("	" + text + "\n")
+	}
+	return b.String()
+}
+
+// Displays untimed lyrics in a scrollable block
+func (m model) plainLines() string {
+	var b strings.Builder
+	for i, line := range strings.Split(m.lyrics.Plain, "\n") {
+		if i == m.lyricsRows() {
+			break
+		}
+		b.WriteString("	" + clip(line, m.contentWidth()-6) + "\n")
+	}
+	return b.String()
+}
+
+// Returns the current lyric line index, or -1 before the first line starts
+func (m model) lyricAt() int {
+	at := -1
+	for i, line := range m.lyrics.Synced {
+		if line.Time > m.elapsed {
+			break
+		}
+		at = i
+	}
+	return at
+}
+
+// Calculates available lyric lines after reserving space for the heading and footer
+func (m model) lyricsRows() int {
+	n := m.drawRows() - 4
+	if n < 1 {
+		return 1
+	}
+	return n
+}

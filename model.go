@@ -21,6 +21,7 @@ const (
 	modeFiles               // picking an mp3 in the library folder
 	modeHistory             // picking something from the history
 	modePlaying             // the player
+	modeLyrics              // words of the track playing
 )
 
 // The choices down the left, in the order they are shown. The iota constants
@@ -184,8 +185,10 @@ type model struct {
 	artKey string
 
 	// Tracks which song the lyrics belong to and whether lookup failed
-	lyrics        lyrics
-	lyricsFor     string
+	lyrics    lyrics
+	lyricsFor string
+	// Remembers the previous screen so closing lyrics returns there
+	lyricsFrom    mode
 	lyricsLoading bool
 	lyricsFailed  bool
 
@@ -304,6 +307,8 @@ func (m model) View() tea.View {
 		s = m.drawItems()
 	case modePlaying:
 		s = m.drawPlayer()
+	case modeLyrics:
+		s = m.drawLyrics()
 	}
 
 	v := tea.NewView(s)

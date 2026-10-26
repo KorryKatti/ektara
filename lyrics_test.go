@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -380,3 +381,51 @@ func TestPruneSearchCacheKeepsLyrics(t *testing.T) {
 		t.Error("pruning kept the ancient search")
 	}
 }
+
+func TestLyricsCmdTakesTheRememberedAnswer(t *testing.T) {
+	// A remembered answer must come back without asking the network at all.
+	db := testCacheDB(t)
+	track := Track{ID: "fffffffffff", Song: "Anything"}
+	storeLyrics(db, track, lyrics{Plain: "remembered words"})
+
+	msg, ok := lyricsCmd(db, track)().(lyricsMsg)
+
+	if !ok {
+		t.Fatal("wanted a lyricsMsg")
+	}
+	if msg.err != nil || msg.lyrics.Plain != "remembered words" || msg.forTrack != lyricsKey(track) {
+		t.Errorf("got %+v, want the remembered words", msg)
+	}
+}
+
+func TestOnLyricsDropsALateAnswer(t *testing.T) {
+	// The track changed while the lookup was out. Its words must not land on
+	// the song that is playing now.
+	m := model{lyricsFor: lyricsKey(Track{ID: "now"}), lyricsLoading: true}
+
+	next, _ := m.onLyrics(lyricsMsg{forTrack: lyricsKey(Track{ID: "then"}), lyrics: lyrics{Plain: "old words"}})
+	got := next.(model)
+
+	if !got.lyricsLoading || got.lyrics.Plain != "" {
+		t.Errorf("got %+v, want the late answer dropped", got)
+	}
+}
+
+func TestOnLyricsTakesAOneThatWasWantedAndMarksAFailure(t *testing.T) {
+	track := Track{ID: "now", Filename: "now.mp3"}
+	m := model{lyricsFor: lyricsKey(track), lyricsLoading: true}
+
+	next, _ := m.onLyrics(lyricsMsg{forTrack: lyricsKey(track), lyrics: lyrics{Plain: "words"}})
+	got := next.(model)
+	if got.lyricsLoading || got.lyrics.Plain != "words" || got.lyricsFailed {
+		t.Errorf("got %+v, want the words shown", got)
+	}
+
+	next, _ = m.onLyrics(lyricsMsg{forTrack: lyricsKey(track), err: errors.New("503 Service Unavailable")})
+	got = next.(model)
+	if got.lyricsLoading || !got.lyricsFailed {
+		t.Errorf("got %+v, want the failure marked", got)
+	}
+}
+
+// tests are indeed ai written

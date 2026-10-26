@@ -1228,3 +1228,102 @@ func accentRGB() string {
 	}
 	return fmt.Sprintf("38;2;%d;%d;%d", n>>16&0xFF, n>>8&0xFF, n&0xFF)
 }
+
+// Every state of the lyrics screen says which one it is, so a blank box is never
+// a mystery: still looking, nothing to show, or the server not answering.
+func TestDrawLyricsShowsTheState(t *testing.T) {
+	lines := []lyricLine{{Time: 0, Text: "one"}}
+
+	cases := []struct {
+		name  string
+		build func(model) model
+		want  string
+	}{
+		{"looking", func(m model) model { m.lyricsLoading = true; return m }, "looking for lyrics"},
+		{"none", func(m model) model { return m }, "no lyrics for this track"},
+		{"failed", func(m model) model { m.lyricsFailed = true; return m }, "could not reach lrclib.net"},
+		{"instrumental", func(m model) model { m.lyrics = lyrics{Instrumental: true}; return m }, "instrumental"},
+		{"plain", func(m model) model { m.lyrics = lyrics{Plain: "just words"}; return m }, "just words"},
+		{"synced", func(m model) model { m.lyrics = lyrics{Synced: lines}; return m }, "one"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := initialModel(nil, nil)
+			m.width, m.height = 80, 30
+			m.track = Track{Title: "Midnight City"}
+
+			got := stripped(c.build(m).drawLyrics())
+			if !strings.Contains(got, c.want) {
+				t.Errorf("the screen does not say %q:\n%s", c.want, got)
+			}
+		})
+	}
+}
+
+// The block scrolls to follow the line being sung, so on a long song the top of
+// the words is not where the eye is kept.
+func TestDrawLyricsFollowsTheLine(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.width, m.height = 80, 30
+	m.track = Track{Title: "Long Song"}
+
+	// one line a second, forty of them, and the song is twenty seconds in
+	for i := 0; i < 40; i++ {
+		m.lyrics.Synced = append(m.lyrics.Synced, lyricLine{
+			Time: time.Duration(i) * time.Second,
+			Text: fmt.Sprintf("line %d", i),
+		})
+	}
+	m.elapsed = 20 * time.Second
+
+	got := stripped(m.drawLyrics())
+
+	if !strings.Contains(got, "line 20") {
+		t.Errorf("the line being sung is not on screen:\n%s", got)
+	}
+	if strings.Contains(got, "line 0") {
+		t.Errorf("the block did not scroll, it is still at the top:\n%s", got)
+	}
+	if !strings.Contains(got, "▸ line 20") {
+		t.Errorf("the line being sung is not marked:\n%s", got)
+	}
+}
+
+// l opens the words from any screen but the search box, and closing them goes
+// back to where they were opened from.
+func TestLyricsKeyOpensWhereItWasAndClosesBack(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.mode = modeHistory
+	m.track = Track{Title: "Midnight City"}
+
+	next, _ := m.onKey(tea.KeyPressMsg(tea.Key{Code: 'l'}))
+	opened := next.(model)
+	if opened.mode != modeLyrics || opened.lyricsFrom != modeHistory {
+		t.Fatalf("l opened %v from %v, want the lyrics from history", opened.mode, opened.lyricsFrom)
+	}
+
+	next, _ = opened.onKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	closed := next.(model)
+	if closed.mode != modeHistory {
+		t.Errorf("esc went to %v, want back to history", closed.mode)
+	}
+
+	// and l again closes it as well
+	next, _ = opened.onKey(tea.KeyPressMsg(tea.Key{Code: 'l'}))
+	if got := next.(model); got.mode != modeHistory {
+		t.Errorf("l on the words screen went to %v, want back to history", got.mode)
+	}
+}
+
+func TestLyricsKeyTypesAnLInTheSearchBox(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.mode = modeSearch
+
+	// Text is what a real terminal sends along with the key code, and what the
+	// search box types.
+	next, _ := m.onKey(tea.KeyPressMsg(tea.Key{Code: 'l', Text: "l"}))
+	if got := next.(model); got.mode != modeSearch || got.searchInput != "l" {
+		t.Errorf("in the search box l gave mode %v and input %q, want it typed", got.mode, got.searchInput)
+	}
+}
