@@ -680,16 +680,31 @@ func (m model) drawSearch() string {
 
 	var b strings.Builder
 	b.WriteString(fg(titleTextStyle, prompt) + "\n\n")
-	b.WriteString("  " + fg(cursorStyle, m.searchInput) + "▌\n\n")
+	if m.askingCount {
+		b.WriteString("  " + fg(cursorStyle, m.searchInput) + "▌\n\n")
+	} else {
+		b.WriteString("  " + m.searchField("song:  ", m.searchInput, m.searchFocus == 0) + "\n")
+		b.WriteString("  " + m.searchField("artist:", m.searchArtist, m.searchFocus == 1) + fg(dimStyle, " optional") + "\n\n")
+	}
 
 	// while the search is out, show that something is happening
 	if m.searching {
 		b.WriteString("  " + spinFrame(m.spin) + " Searching...\n")
-	} else {
+	} else if m.askingCount {
 		b.WriteString(fg(dimStyle, "enter confirm, backspace erase, esc back") + "\n")
+	} else {
+		b.WriteString(fg(dimStyle, "enter confirm, tab song/artist, backspace erase, esc back") + "\n")
 	}
 
 	return m.frame(b.String())
+}
+
+// One search field, with the cursor when it has the focus.
+func (m model) searchField(label, value string, focused bool) string {
+	if focused {
+		return fg(dimStyle, label+" ") + fg(cursorStyle, value) + "▌"
+	}
+	return fg(dimStyle, label+" ") + value
 }
 
 // The busy animation.
@@ -907,7 +922,7 @@ func (m model) metaLine() string {
 // show their state, because a key that does nothing visible is a key nobody
 // presses twice.
 func (m model) keyHints() string {
-	return fmt.Sprintf("← → seek   a prev   d next   p pause   s shuffle %s   r repeat %s   q back",
+	return fmt.Sprintf("← → seek   a prev   d next   p pause   s shuffle %s   r repeat %s   l lyrics   q back",
 		onOff(m.opts.shuffle), onOff(m.opts.repeat))
 }
 
@@ -1120,41 +1135,73 @@ func (m model) drawLyrics() string {
 		b.WriteString(fg(dimStyle, "	no lyrics for this track") + "\n")
 
 	}
-	b.WriteString("\n" + fg(dimStyle, "l or esc back") + "\n")
+	hint := "l or esc back"
+	if len(m.lyrics.Synced) > 0 {
+		hint += " · +/- timing · r reset"
+	}
+	b.WriteString("\n" + fg(dimStyle, hint) + "\n")
 	return m.frame(b.String())
 }
 
-// tbh didnt wanna implement current lyrics but might as well
-// timed lines with the one being sung picke dout
+// The timed lines, with the one being sung picked out. It follows the music
+// until the user scrolls, and then it stays where it was put.
 func (m model) syncedLines() string {
 	var b strings.Builder
+
 	at := m.lyricAt()
-	cursor := at
-	if cursor < 0 {
-		cursor = 0
+	start := m.followStart()
+	if m.lyricsPinned {
+		start = max(0, min(m.lyricsTop, m.lyricsTopLimit()))
 	}
-	start, count := listWindow(len(m.lyrics.Synced), cursor, m.lyricsRows())
-	for i := 0; i < count; i++ {
-		n := start + 1
+
+	total := len(m.lyrics.Synced)
+	for n := start; n < total && n < start+m.lyricsRows(); n++ {
 		text := clip(m.lyrics.Synced[n].Text, m.contentWidth()-6)
 		if n == at {
-			b.WriteString(fg(cursorStyle, "> "+text) + "\n")
+			b.WriteString(fg(cursorStyle, "▸ "+text) + "\n")
 			continue
-			// her love in your head , you lost her earrings in her bed
 		}
-		b.WriteString("	" + text + "\n")
+		b.WriteString("  " + text + "\n")
 	}
 	return b.String()
 }
 
-// Displays untimed lyrics in a scrollable block
+// Where the timed block starts when it is following the music: the line being
+// sung, kept near the middle.
+func (m model) followStart() int {
+	if len(m.lyrics.Synced) == 0 {
+		return 0
+	}
+	cursor := m.lyricAt()
+	if cursor < 0 {
+		cursor = 0
+	}
+	start, _ := listWindow(len(m.lyrics.Synced), cursor, m.lyricsRows())
+	return start
+}
+
+// The furthest the block can be scrolled while still filling the box.
+func (m model) lyricsTopLimit() int {
+	total := len(m.lyrics.Synced)
+	if total == 0 {
+		total = len(strings.Split(m.lyrics.Plain, "\n"))
+	}
+	return max(0, total-m.lyricsRows())
+}
+
+// Words without timings, as a block. There is nothing to follow, so it starts
+// at the top and moves only when the arrows ask.
 func (m model) plainLines() string {
 	var b strings.Builder
-	for i, line := range strings.Split(m.lyrics.Plain, "\n") {
-		if i == m.lyricsRows() {
-			break
-		}
-		b.WriteString("	" + clip(line, m.contentWidth()-6) + "\n")
+
+	lines := strings.Split(m.lyrics.Plain, "\n")
+	start := 0
+	if m.lyricsPinned {
+		start = max(0, min(m.lyricsTop, m.lyricsTopLimit()))
+	}
+
+	for i := start; i < len(lines) && i < start+m.lyricsRows(); i++ {
+		b.WriteString("  " + clip(lines[i], m.contentWidth()-6) + "\n")
 	}
 	return b.String()
 }
@@ -1163,7 +1210,7 @@ func (m model) plainLines() string {
 func (m model) lyricAt() int {
 	at := -1
 	for i, line := range m.lyrics.Synced {
-		if line.Time > m.elapsed {
+		if line.Time+m.lyricOffset > m.elapsed {
 			break
 		}
 		at = i

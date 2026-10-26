@@ -156,6 +156,81 @@ func TestPickRecordKeepsAnInstrumental(t *testing.T) {
 	}
 }
 
+func TestFindLyricsRetriesWithoutTheArtist(t *testing.T) {
+	// A credit line can be stricter than LRCLIB's filing, hiding the only words.
+	fastLyricsLimiter(t)
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Query().Get("artist_name") != "" {
+			_, _ = w.Write([]byte(`[{"id":1,"duration":170,"instrumental":true}]`))
+			return
+		}
+		_, _ = w.Write([]byte(`[{"id":2,"duration":170,"syncedLyrics":"[00:01.00] words"}]`))
+	}))
+	t.Cleanup(server.Close)
+	old := lyricsBaseURL
+	lyricsBaseURL = server.URL
+	t.Cleanup(func() { lyricsBaseURL = old })
+
+	got, ok, err := findLyrics(context.TODO(), lyricQuery{
+		Song: "33 Max Verstappen", Artist: "Carte Blanq, Nils van Zandt & Maxx Power", Duration: 171 * time.Second,
+	})
+
+	if err != nil || !ok || got.ID != 2 {
+		t.Errorf("got %+v ok=%v err=%v, want the retry's words", got, ok, err)
+	}
+	if requests != 2 {
+		t.Errorf("made %d requests, want the artist one then the loose one", requests)
+	}
+}
+
+func TestFindLyricsAsksOnceWhenTheArtistWorks(t *testing.T) {
+	fastLyricsLimiter(t)
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(`[{"id":1,"duration":170,"syncedLyrics":"[00:01.00] words"}]`))
+	}))
+	t.Cleanup(server.Close)
+	old := lyricsBaseURL
+	lyricsBaseURL = server.URL
+	t.Cleanup(func() { lyricsBaseURL = old })
+
+	got, ok, err := findLyrics(context.TODO(), lyricQuery{
+		Song: "33 Max Verstappen", Artist: "Carte Blanq", Duration: 171 * time.Second,
+	})
+
+	if err != nil || !ok || got.ID != 1 || requests != 1 {
+		t.Errorf("got %+v ok=%v err=%v requests=%d, want one request", got, ok, err, requests)
+	}
+}
+
+func TestFindLyricsKeepsALooseFailureAnError(t *testing.T) {
+	fastLyricsLimiter(t)
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Query().Get("artist_name") != "" {
+			_, _ = w.Write([]byte(`[{"id":1,"duration":170,"instrumental":true}]`))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	old := lyricsBaseURL
+	lyricsBaseURL = server.URL
+	t.Cleanup(func() { lyricsBaseURL = old })
+
+	_, _, err := findLyrics(context.TODO(), lyricQuery{
+		Song: "33 Max Verstappen", Artist: "Carte Blanq", Duration: 171 * time.Second,
+	})
+
+	if err == nil || requests != 2 {
+		t.Errorf("err %v requests=%d, want the loose failure carried back", err, requests)
+	}
+}
+
 func TestLyricQueryFromTrackPrefersTheSongName(t *testing.T) {
 	// The song name is the search key; the video title is only what to fall
 	// back to when the song was never learned.
@@ -174,6 +249,20 @@ func TestLyricQueryFromTrackPrefersTheSongName(t *testing.T) {
 	track.Song = ""
 	if got := lyricQueryFromTrack(track); got.Song != "youtube - Never Gonna Give You Up" {
 		t.Errorf("got %+v, want the title as the fallback", got)
+	}
+}
+
+func TestLyricQueryFromTrackUsesTheSearchArtistAsAHint(t *testing.T) {
+	track := Track{Title: "Fall [Official Audio]", ArtistHint: "Eminem", Duration: 263 * time.Second}
+
+	if got := lyricQueryFromTrack(track); got.Artist != "Eminem" {
+		t.Errorf("artist %q, want the artist typed into the search", got.Artist)
+	}
+
+	track.Artist = "Eminem"
+	track.ArtistHint = "a wrong hint"
+	if got := lyricQueryFromTrack(track); got.Artist != "Eminem" {
+		t.Errorf("artist %q, want the track's own artist to win", got.Artist)
 	}
 }
 

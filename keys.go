@@ -79,6 +79,8 @@ func (m model) startMenuChoice() (tea.Model, tea.Cmd) {
 	case menuOnline, menuStream:
 		m.mode = modeSearch
 		m.searchInput = ""
+		m.searchArtist = ""
+		m.searchFocus = 0
 		m.askingCount = false
 		m.searchWasStream = m.menuCursor == menuStream
 		return m, nil
@@ -87,6 +89,8 @@ func (m model) startMenuChoice() (tea.Model, tea.Cmd) {
 	case menuQueue:
 		m.mode = modeSearch
 		m.searchInput = ""
+		m.searchArtist = ""
+		m.searchFocus = 0
 		m.askingCount = true
 		return m, nil
 
@@ -133,6 +137,12 @@ func (m model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeMenu
 		return m, nil
 
+	case "tab":
+		if !m.askingCount && !m.searching {
+			m.searchFocus = 1 - m.searchFocus
+		}
+		return m, nil
+
 	case "enter":
 		// One search at a time: a second enter would start a duplicate request.
 		if m.searching {
@@ -146,20 +156,38 @@ func (m model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		// Searching takes a network round trip, so it happens in the background.
 		m.searching = true
-		return m, searchCmd(m.db, m.searchInput)
+		return m, searchCmd(m.db, m.youtubeQuery())
 
 	case "backspace":
-		if m.searchInput != "" {
-			m.searchInput = m.searchInput[:len(m.searchInput)-1]
+		if m.askingCount || m.searchFocus == 0 {
+			if m.searchInput != "" {
+				m.searchInput = m.searchInput[:len(m.searchInput)-1]
+			}
+		} else if m.searchArtist != "" {
+			m.searchArtist = m.searchArtist[:len(m.searchArtist)-1]
 		}
 		return m, nil
 	}
 
-	// Anything else that is a plain character gets typed into the box.
+	// Anything else that is a plain character gets typed into the focused box.
 	if !m.searching && len(msg.Key().Text) > 0 {
-		m.searchInput += msg.Key().Text
+		if m.askingCount || m.searchFocus == 0 {
+			m.searchInput += msg.Key().Text
+		} else {
+			m.searchArtist += msg.Key().Text
+		}
 	}
 	return m, nil
+}
+
+// The term sent to YouTube, with the artist in front unless the term has it.
+func (m model) youtubeQuery() string {
+	song := strings.TrimSpace(m.searchInput)
+	artist := strings.TrimSpace(m.searchArtist)
+	if artist == "" || strings.Contains(strings.ToLower(song), strings.ToLower(artist)) {
+		return song
+	}
+	return artist + " " + song
 }
 
 // Collects the requested number of tracks; a single track plays normally
@@ -215,7 +243,7 @@ func (m model) onListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Downloads the selected result and plays it when ready
 		if picked.needsDownload {
 			m.say("Downloading ...")
-			return m, downloadCmd(picked.track.ID, picked.track.Title, adding)
+			return m, downloadCmd(picked.track.ID, picked.track.Title, picked.track.ArtistHint, adding)
 		}
 
 		// Adds the track to the queue and plays when all requested tracks are collected
@@ -251,6 +279,29 @@ func (m model) transportKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if msg.String() == "l" {
 		next, cmd := m.toggleLyrics()
 		return next, cmd, true
+	}
+
+	// On the words screen the arrows move the text instead of the music. There
+	// is nothing to lose: the position stays on the player bar either way.
+	if m.mode == modeLyrics {
+		if step := lyricScrollStep(msg.String()); step != 0 {
+			next, cmd := m.scrollLyrics(step)
+			return next, cmd, true
+		}
+		if len(m.lyrics.Synced) > 0 {
+			switch msg.String() {
+			case "+", "=":
+				m.shiftLyrics(lyricOffsetStep)
+				return m, nil, true
+			case "-", "_":
+				m.shiftLyrics(-lyricOffsetStep)
+				return m, nil, true
+			case "r":
+				m.lyricOffset = 0
+				m.say("lyrics timing reset")
+				return m, nil, true
+			}
+		}
 	}
 
 	if m.loading {
@@ -352,6 +403,41 @@ func (m model) toggleLyrics() (tea.Model, tea.Cmd) {
 }
 
 // Handles leaving the lyrics screen; transport keys are handled earlier
+const lyricOffsetStep = 100 * time.Millisecond
+
+// Moves the words later (+) or earlier (-), up to five seconds either way.
+func (m *model) shiftLyrics(by time.Duration) {
+	m.lyricOffset = max(-5*time.Second, min(m.lyricOffset+by, 5*time.Second))
+	m.say(fmt.Sprintf("lyrics %+.1fs", m.lyricOffset.Seconds()))
+}
+
+// How far an arrow moves the words. Zero means it is not a scrolling key.
+func lyricScrollStep(key string) int {
+	switch key {
+	case "up":
+		return -1
+	case "down":
+		return 1
+	case "left":
+		return -5
+	case "right":
+		return 5
+	}
+	return 0
+}
+
+// Scrolls the words instead of seeking, which is what the arrows do everywhere
+// else. The first press starts from wherever following the music had the block,
+// so it does not jump, and from then on it stays where it is put.
+func (m model) scrollLyrics(delta int) (tea.Model, tea.Cmd) {
+	if !m.lyricsPinned {
+		m.lyricsTop = m.followStart()
+		m.lyricsPinned = true
+	}
+	m.lyricsTop = max(0, min(m.lyricsTop+delta, m.lyricsTopLimit()))
+	return m, nil
+}
+
 func (m model) onLyricsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":

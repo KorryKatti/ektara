@@ -33,7 +33,9 @@ type Track struct {
 	// What the music is, as far as we know: who made it, what it is on, what it
 	// sounds like and how long it runs. Empty when nothing said.
 	Artist string
-	Album  string
+	// The artist typed in the search box, used only when nothing else names one.
+	ArtistHint string
+	Album      string
 	// The name of the song, which is not always the name of the video.
 	Song     string
 	Genres   []string

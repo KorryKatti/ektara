@@ -54,9 +54,10 @@ func recentCmd(db *sql.DB) tea.Cmd {
 // Downloads a YouTube video as MP3 and returns the track
 // forQueue indicates whether to queue or play the track
 
-func downloadCmd(id, title string, forQueue bool) tea.Cmd {
+func downloadCmd(id, title, artistHint string, forQueue bool) tea.Cmd {
 	return func() tea.Msg {
 		track, err := downloadVideo(id, title)
+		track.ArtistHint = artistHint
 		return downloadedMsg{track: track, err: err, forQueue: forQueue}
 	}
 }
@@ -75,12 +76,11 @@ func lyricsCmd(db *sql.DB, t Track) tea.Cmd {
 		for attempt := 0; attempt < 3; attempt++ {
 			time.Sleep(time.Duration(attempt) * time.Second)
 
-			records, err := searchLyrics(context.TODO(), lyricQueryFromTrack(t))
+			found, ok, err := findLyrics(context.TODO(), lyricQueryFromTrack(t))
 			if err != nil {
 				lastErr = err
 				continue
 			}
-			found, ok := pickRecord(records, t.Artist, t.Duration)
 			if ok {
 				msg.lyrics = found.asLyrics()
 			}

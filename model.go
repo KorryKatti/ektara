@@ -118,6 +118,9 @@ type model struct {
 	// --- search screen ---
 	// The box the user is typing into: a search name or a number.
 	searchInput string
+	// The optional artist, and which of the two boxes has the focus.
+	searchArtist string
+	searchFocus  int
 	// True when this screen wants a number rather than a name.
 	askingCount bool
 	// Remembers whether we came from "Online" or "Stream".
@@ -191,6 +194,13 @@ type model struct {
 	lyricsFrom    mode
 	lyricsLoading bool
 	lyricsFailed  bool
+	// Where the words are scrolled to, and whether the user put them there.
+	// Following the music is the default; scrolling once turns it off until the
+	// next track, so the text does not fight the reading.
+	lyricsTop    int
+	lyricsPinned bool
+	// How late (+) or early (-) the words run, in this track's session.
+	lyricOffset time.Duration
 
 	// A pointer because there is one for the session, and it carries its own lock.
 	presence *presence

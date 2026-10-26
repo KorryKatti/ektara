@@ -128,6 +128,93 @@ func TestDrawSearchShowsSearching(t *testing.T) {
 	}
 }
 
+// The search box takes a song and, after tab, an optional artist. The song is
+// still the key, so enter from either box means search.
+func TestSearchTakesAnOptionalArtist(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.mode = modeSearch
+	m.searchInput = "fall"
+
+	next, _ := m.onKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab}))
+	m = next.(model)
+	if m.searchFocus != 1 {
+		t.Fatalf("focus %d after tab, want the artist box", m.searchFocus)
+	}
+
+	next, _ = m.onKey(tea.KeyPressMsg(tea.Key{Code: 'e', Text: "e"}))
+	m = next.(model)
+	next, _ = m.onKey(tea.KeyPressMsg(tea.Key{Code: 'm', Text: "m"}))
+	m = next.(model)
+	if m.searchInput != "fall" || m.searchArtist != "em" {
+		t.Errorf("song %q artist %q, want the artist typed into its own box", m.searchInput, m.searchArtist)
+	}
+
+	next, _ = m.onKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
+	m = next.(model)
+	if m.searchInput != "fall" || m.searchArtist != "e" {
+		t.Errorf("song %q artist %q, want backspace to edit the artist", m.searchInput, m.searchArtist)
+	}
+	next, _ = m.onKey(tea.KeyPressMsg(tea.Key{Code: 'm', Text: "m"}))
+	m = next.(model)
+
+	next, _ = m.onKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = next.(model)
+	if !m.searching {
+		t.Error("enter in the artist box did not start the search")
+	}
+	if got := m.youtubeQuery(); got != "em fall" {
+		t.Errorf("query %q, want the artist in front", got)
+	}
+}
+
+func TestSearchArtistDoesNotRepeatTheSong(t *testing.T) {
+	m := model{searchInput: "Eminem - Fall", searchArtist: "eminem"}
+	if got := m.youtubeQuery(); got != "Eminem - Fall" {
+		t.Errorf("query %q, want the song alone", got)
+	}
+
+	m.searchArtist = "Eminem"
+	if got := m.youtubeQuery(); got != "Eminem - Fall" {
+		t.Errorf("query %q, want the song alone", got)
+	}
+
+	m.searchArtist = ""
+	if got := m.youtubeQuery(); got != "Eminem - Fall" {
+		t.Errorf("query %q, want the song alone", got)
+	}
+}
+
+func TestDrawSearchShowsTheArtistBox(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.width, m.height = 80, 30
+	m.searchInput = "fall"
+	m.searchArtist = "eminem"
+	m.searchFocus = 1
+
+	got := m.drawSearch()
+	if !strings.Contains(got, "artist:") || !strings.Contains(got, "optional") {
+		t.Errorf("search screen has no optional artist box:\n%s", got)
+	}
+	if !strings.Contains(got, "tab song/artist") {
+		t.Errorf("search screen does not mention tab:\n%s", got)
+	}
+}
+
+func TestOnSearchedKeepsTheArtistHint(t *testing.T) {
+	m := model{searching: true, searchArtist: " Eminem "}
+
+	next, _ := m.onSearched(searchedMsg{videos: []video{{ID: "x", Title: "Fall [Official Audio]"}}})
+	got := next.(model)
+
+	if len(got.items) != 1 {
+		t.Fatalf("got %d results, want 1", len(got.items))
+	}
+	if got.items[0].track.Artist != "" || got.items[0].track.ArtistHint != "Eminem" {
+		t.Errorf("artist %q hint %q, want the hint kept for the lyrics lookup",
+			got.items[0].track.Artist, got.items[0].track.ArtistHint)
+	}
+}
+
 // Only a screenful of a long list is drawn, and the "showing x-y of n" line says
 // the rest is there.
 func TestDrawItemsWindows(t *testing.T) {
@@ -1325,5 +1412,128 @@ func TestLyricsKeyTypesAnLInTheSearchBox(t *testing.T) {
 	next, _ := m.onKey(tea.KeyPressMsg(tea.Key{Code: 'l', Text: "l"}))
 	if got := next.(model); got.mode != modeSearch || got.searchInput != "l" {
 		t.Errorf("in the search box l gave mode %v and input %q, want it typed", got.mode, got.searchInput)
+	}
+}
+
+// The arrows scroll the words on the lyrics screen instead of seeking, and the
+// first press starts from where the music had got to rather than jumping back.
+func TestLyricsArrowsScrollInsteadOfSeeking(t *testing.T) {
+	m := initialModel(nil, &fakeAudio{})
+	m.mode = modeLyrics
+	m.track = Track{Title: "Long Song"}
+	m.length = 288 * time.Second
+
+	for i := 0; i < 40; i++ {
+		m.lyrics.Synced = append(m.lyrics.Synced, lyricLine{
+			Time: time.Duration(i) * time.Second,
+			Text: fmt.Sprintf("line %d", i),
+		})
+	}
+	m.elapsed = 20 * time.Second
+
+	before := m.startTime // seeking would move this
+	next, _ := m.onKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	got := next.(model)
+
+	if got.startTime != before {
+		t.Error("the down arrow seeked instead of scrolling")
+	}
+	if !got.lyricsPinned || got.lyricsTop != m.followStart()+1 {
+		t.Errorf("pinned=%v top=%d, want a scroll from %d", got.lyricsPinned, got.lyricsTop, m.followStart())
+	}
+	if !strings.Contains(stripped(got.drawLyrics()), "line 21") {
+		t.Errorf("scrolling down did not bring the next line in:\n%s", stripped(got.drawLyrics()))
+	}
+}
+
+// Scrolling stops at the top and the bottom of the block rather than running off
+// it, and a new track lets the words follow the music again.
+func TestLyricsScrollStopsAtTheEnds(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.mode = modeLyrics
+	m.track = Track{Title: "Long Song"}
+
+	for i := 0; i < 40; i++ {
+		m.lyrics.Synced = append(m.lyrics.Synced, lyricLine{
+			Time: time.Duration(i) * time.Second,
+			Text: fmt.Sprintf("line %d", i),
+		})
+	}
+	m.lyricsPinned = true
+
+	for i := 0; i < 50; i++ {
+		next, _ := m.onKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+		m = next.(model)
+	}
+	if m.lyricsTop != m.lyricsTopLimit() {
+		t.Errorf("bottom is %d, want %d", m.lyricsTop, m.lyricsTopLimit())
+	}
+
+	for i := 0; i < 50; i++ {
+		next, _ := m.onKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
+		m = next.(model)
+	}
+	if m.lyricsTop != 0 {
+		t.Errorf("top is %d, want 0", m.lyricsTop)
+	}
+
+	// a new track follows the music again, from wherever the words begin
+	m.lyricOffset = 2 * time.Second
+	m.queue = []Track{{Title: "next"}}
+	m.startTrack()
+	if m.lyricsPinned || m.lyricsTop != 0 || m.lyricOffset != 0 {
+		t.Errorf("new track pinned=%v top=%d offset=%v, want following again", m.lyricsPinned, m.lyricsTop, m.lyricOffset)
+	}
+}
+
+// + and - move the words in time, r puts them back, and none of it is the volume.
+func TestLyricsTimingKeys(t *testing.T) {
+	m := initialModel(nil, &fakeAudio{})
+	m.mode = modeLyrics
+	m.track = Track{Title: "Off Beat"}
+	m.lyrics.Synced = []lyricLine{{Time: 10 * time.Second, Text: "line"}}
+	m.elapsed = 10 * time.Second
+	m.volume = 0.5
+	volume := m.volume
+
+	next, _ := m.onKey(tea.KeyPressMsg(tea.Key{Code: '+'}))
+	m = next.(model)
+	if m.lyricOffset != 100*time.Millisecond {
+		t.Fatalf("offset %v, want +0.1s", m.lyricOffset)
+	}
+	if m.lyricAt() != -1 {
+		t.Error("a later line should not be current yet")
+	}
+	if m.volume != volume {
+		t.Error("timing changed the volume")
+	}
+
+	next, _ = m.onKey(tea.KeyPressMsg(tea.Key{Code: '-'}))
+	m = next.(model)
+	next, _ = m.onKey(tea.KeyPressMsg(tea.Key{Code: '-'}))
+	m = next.(model)
+	if m.lyricOffset != -100*time.Millisecond || m.lyricAt() != 0 {
+		t.Errorf("offset %v at %d, want -0.1s and the line current", m.lyricOffset, m.lyricAt())
+	}
+
+	next, _ = m.onKey(tea.KeyPressMsg(tea.Key{Code: 'r'}))
+	m = next.(model)
+	if m.lyricOffset != 0 || m.opts.repeat {
+		t.Errorf("r gave offset %v repeat=%v, want a reset and nothing else", m.lyricOffset, m.opts.repeat)
+	}
+
+	// with no timed words, + is the volume again
+	m.lyrics.Synced = nil
+	next, _ = m.onKey(tea.KeyPressMsg(tea.Key{Code: '+'}))
+	m = next.(model)
+	if m.volume == volume {
+		t.Error("without timed words + should still be the volume")
+	}
+}
+
+func TestKeyHintsMentionTheLyrics(t *testing.T) {
+	m := initialModel(nil, nil)
+	if hints := stripped(m.keyHints()); !strings.Contains(hints, "l lyrics") {
+		t.Errorf("the hints do not mention the lyrics: %q", hints)
 	}
 }

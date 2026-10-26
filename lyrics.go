@@ -31,7 +31,7 @@ var (
 
 // A contact address, so they know who to find if something goes wrong. It is
 // not enforced, but it is how lrclib.net asks to be used.
-const lyricsUserAgent = "ektara (https://github.com/ribo/ektara)"
+const lyricsUserAgent = "ektara (https://github.com/korrykatti/ektara)"
 
 // One request at a time, with a pause between the end of one and the start of
 // the next, which is what lrclib.net's usage note asks for. Its own limiter, not
@@ -94,7 +94,11 @@ type lyricQuery struct {
 // learned. The album is not sent: LRCLIB's search does not want it, and we
 // rarely have it.
 func lyricQueryFromTrack(t Track) lyricQuery {
-	q := lyricQuery{Song: t.Song, Artist: t.Artist, Duration: t.Duration}
+	artist := t.Artist
+	if artist == "" {
+		artist = t.ArtistHint
+	}
+	q := lyricQuery{Song: t.Song, Artist: artist, Duration: t.Duration}
 	if q.Song == "" {
 		q.Song = t.Title
 	}
@@ -144,6 +148,29 @@ func searchLyrics(ctx context.Context, q lyricQuery) ([]lyricRecord, error) {
 		return nil, fmt.Errorf("lrclib search: %w", err)
 	}
 	return records, nil
+}
+
+// findLyrics searches with the artist first, then without when that found no words.
+func findLyrics(ctx context.Context, q lyricQuery) (lyricRecord, bool, error) {
+	records, err := searchLyrics(ctx, q)
+	if err != nil {
+		return lyricRecord{}, false, err
+	}
+	found, ok := pickRecord(records, q.Artist, q.Duration)
+	if q.Artist == "" || (ok && !found.Instrumental) {
+		return found, ok, nil
+	}
+
+	loose := q
+	loose.Artist = ""
+	records, err = searchLyrics(ctx, loose)
+	if err != nil {
+		return lyricRecord{}, false, err
+	}
+	if wider, ok := pickRecord(records, q.Artist, q.Duration); ok {
+		return wider, true, nil
+	}
+	return found, ok, nil
 }
 
 // pickRecord picks the candidate to sing along to, or says there is none. Three

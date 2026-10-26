@@ -5,6 +5,7 @@ package main
 
 import (
 	"log"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -63,6 +64,9 @@ func (m *model) startTrack() tea.Cmd {
 	m.lyricsLoading = true
 	m.lyricsFailed = false
 	m.lyricsFor = lyricsKey(m.track)
+	m.lyricsPinned = false
+	m.lyricsTop = 0
+	m.lyricOffset = 0
 
 	// No tick here. onTick batches one of its own onto whatever this returns, so
 	// the chain Init started keeps being renewed; starting a second one here would
@@ -265,6 +269,7 @@ func (m model) onSearched(msg searchedMsg) (tea.Model, tea.Cmd) {
 	for _, v := range msg.videos {
 		row := item{title: v.Title, track: Track{ID: v.ID, Title: v.Title}}
 		row.track.fillFromTitle()
+		row.track.ArtistHint = strings.TrimSpace(m.searchArtist)
 		if m.searchWasStream {
 			row.track.PageURL = "https://www.youtube.com/watch?v=" + v.ID
 			row.track.Stream = true
