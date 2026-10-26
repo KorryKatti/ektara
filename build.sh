@@ -8,6 +8,11 @@
 # neither is needed to run it. -trimpath drops the full paths of the machine
 # that built it, which is both a little smaller and a little less to leak.
 #
+# The version and commit are stamped in from git, so a tag is the only thing
+# that changes what --version says. --always keeps the version readable when
+# the tree has no tags yet: it falls back to the commit hash instead of
+# printing nothing.
+#
 # Usage:  ./build.sh          build ./ektara
 #         ./build.sh run      build it, then run it
 
@@ -15,7 +20,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 out=ektara
-flags=(-trimpath -ldflags="-s -w")
+version=$(git describe --tags --always --dirty)
+commit=$(git rev-parse --short HEAD)
+flags=(-trimpath -ldflags="-s -w -X main.version=$version -X main.commit=$commit")
 
 echo "building $out ..."
 go build "${flags[@]}" -o "$out" .

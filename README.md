@@ -19,6 +19,16 @@ Discord rich presence.
 - `ffmpeg`, only for downloading. Streaming and local files go through mpv.
 - `yt-dlp` is downloaded automatically when first needed.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh | sh
+```
+
+Checks for Go, a C compiler and libmpv, then builds and installs to
+`~/.local/bin`. `wget -qO- <same URL> | sh` works too; `BINDIR` changes the
+destination.
+
 ## Build and run
 
 ```sh
@@ -123,3 +133,8 @@ colour worth having.
 git clone https://github.com/nearlynithin/go-ascii
 cd go-ascii && go build -o go-ascii && ./go-ascii [-color] <image.png>
 ```
+
+## License
+
+GPL-2.0-or-later, see [LICENSE](LICENSE). ektara uses
+[libmpv](https://mpv.io), which is GPL too.

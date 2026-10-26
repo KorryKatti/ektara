@@ -9,9 +9,18 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+)
+
+// What this binary thinks it is. build.sh stamps both in from git with
+// -ldflags, so a tag is the only thing that changes them; a plain go build
+// leaves the defaults, which are still readable rather than blank.
+var (
+	version = "dev"
+	commit  = "unknown"
 )
 
 const discordAppID = "1553038133006704670"
@@ -19,7 +28,22 @@ const discordAppID = "1553038133006704670"
 // Fast enough for a smooth progress bar, slow enough to cost nothing.
 const redrawEvery = 100 * time.Millisecond
 
+// The one line --version prints. Everything a bug report needs to match a
+// binary to a build: the name, the git version, the commit, and the Go and
+// platform it was built with.
+func versionLine() string {
+	return fmt.Sprintf("ektara %s (commit %s, %s, %s/%s)",
+		version, commit, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+}
+
 func main() {
+	// --version answers and leaves, before the log file and the database are
+	// touched: neither is needed to say what this is.
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println(versionLine())
+		return
+	}
+
 	// Nothing may write a log line to the terminal: the interface owns it, and a
 	// line lands in the middle of the drawing. A missing log is a nuisance, a
 	// garbled screen is a bug, so it is thrown away instead.
