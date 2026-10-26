@@ -141,7 +141,10 @@ func (p *player) listen() {
 	defer close(p.stopped)
 
 	for {
-		event := p.handle.WaitEvent(0)
+		// -1 means wait here until mpv has an event. Zero would mean "do not wait",
+		// so this loop would spin as fast as the CPU allows and eat a whole core
+		// while nothing plays. Close calls Wakeup to break us out of this wait.
+		event := p.handle.WaitEvent(-1)
 
 		// the loop is about to end rather than the next event, which is how the
 		// empty one Wakeup sends is told apart
