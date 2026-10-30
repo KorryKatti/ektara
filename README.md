@@ -6,6 +6,44 @@ Discord rich presence.
 
 ![ektara playing a song with the lyrics on screen, the sung line highlighted and the player bar along the bottom](assets/Untitled.gif)
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh | sh -s -- v0.1.0
+```
+
+Builds `v0.1.0` into `~/.local/bin`; swap the tag for a newer release.
+
+<details>
+<summary>Other install options</summary>
+
+Current `main`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh | sh
+```
+
+Or set the version (an argument wins):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh | EKTARA_VERSION=v0.1.0 sh
+```
+
+`wget -qO- <same URL> | sh -s -- v0.1.0` also works. `BINDIR` changes the
+destination; `--install-deps` installs missing packages (not Go).
+
+To inspect first (piping a remote script into `sh` is remote code execution):
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh
+less install.sh
+sh install.sh v0.1.0
+```
+
+The script still comes from `main`; pin its URL to pin both halves.
+
+</details>
+
 ## Requirements
 
 - Go 1.27+, and a C compiler (cgo, which `go-sqlite3` needed anyway)
@@ -19,44 +57,6 @@ Discord rich presence.
   Debian 12 ships libmpv 0.35.1, which is too old.
 - `ffmpeg`, only for downloading. Streaming and local files go through mpv.
 - `yt-dlp` is downloaded automatically when first needed.
-
-## Install
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh | sh
-```
-
-That builds the current `main`. To build a release instead:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh | sh -s -- v0.1.0
-```
-
-Or pass it to the installer through the environment:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh | EKTARA_VERSION=v0.1.0 sh
-```
-
-An argument wins over the environment.
-Checks for Go 1.27+, a C compiler and libmpv 0.37+, then builds and installs to
-`~/.local/bin`. `wget -qO- <same URL> | sh` works too; `BINDIR` changes the
-destination. Add `--install-deps` to install missing packages (Go is not
-installed automatically; it points at the official tarball). There are no
-prebuilt binaries: installing means building from source, so the requirements
-above are not optional.
-
-Piping a remote script into `sh` is remote code execution. To read it first:
-
-```sh
-curl -fsSLO https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh
-less install.sh
-sh install.sh v0.1.0
-```
-
-That still downloads the script from `main`; pin the script's URL to a tag that
-contains this installer if you want both halves pinned. Reading it is informed
-trust, not verification.
 
 ## Build and run
 
