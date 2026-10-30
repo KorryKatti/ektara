@@ -45,6 +45,14 @@ var menuDescriptions = []string{
 	"leave",
 }
 
+// genres for a track or news that mb couldnt be reached
+type genresMsg struct {
+	// prevent late answer from landing on wrong track
+	forTrack string
+	genres   []string
+	err      error
+}
+
 // The line for whichever row the cursor is on.
 func (m model) menuDescription() string {
 	if m.menuCursor < 0 || m.menuCursor >= len(menuDescriptions) {
@@ -294,6 +302,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case lyricsMsg:
 		return m.onLyrics(msg)
+
+	case genresMsg:
+		return m.onGenres(msg)
 
 	case tea.KeyPressMsg:
 		return m.onKey(msg)

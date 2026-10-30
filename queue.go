@@ -11,6 +11,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+// Checks if genres are missing before querying MusicBrainz
+func needsGenres(t Track) bool {
+	return len(t.Genres) == 0
+}
+
 // The one place a queue starts playing.
 func (m model) playQueue(queue []Track) (tea.Model, tea.Cmd) {
 	m.queue = queue
@@ -68,15 +73,19 @@ func (m *model) startTrack() tea.Cmd {
 	m.lyricsTop = 0
 	m.lyricOffset = 0
 
-	// No tick here. onTick batches one of its own onto whatever this returns, so
-	// the chain Init started keeps being renewed; starting a second one here would
-	// make the display repaint twice as fast for the rest of the session.
-	return tea.Batch(
+	// onTick already renews this chain, so starting another would double the refresh rate
+	cmds := []tea.Cmd{
 		openTrackCmd(m.player, m.track),
 		m.presence.showCmd(m.track, m.startTime),
 		artCmd(m.track, m.artWidth()),
 		lyricsCmd(m.db, m.track),
-	)
+	}
+	// Genres are only looked up when the track has none. The answer arrives
+	// later and is applied by onGenres; playback never waits for it.
+	if needsGenres(m.track) {
+		cmds = append(cmds, genreCmd(m.db, m.track))
+	}
+	return tea.Batch(cmds...)
 }
 
 // Ends the audio but keeps the player, and the open device, ready for the next
@@ -101,6 +110,25 @@ func (m model) onLyrics(msg lyricsMsg) (tea.Model, tea.Cmd) {
 	}
 	m.lyrics = msg.lyrics
 	return m, nil
+}
+
+// Updates track and queue genres only if the track is still the same
+func (m model) onGenres(msg genresMsg) (tea.Model, tea.Cmd) {
+	if msg.forTrack != lyricsKey(m.track) {
+		return m, nil
+	}
+	if msg.err != nil {
+		// A failed lookup is not "no genres": nothing is cached, so the next
+		// play can ask again.
+		log.Printf("genres %s: %v", m.track.label(), msg.err)
+		return m, nil
+	}
+	m.track.Genres = msg.genres
+	if len(m.queue) > 0 {
+		m.queue[m.index%len(m.queue)].Genres = msg.genres
+	}
+	return m, nil
+
 }
 
 func (m model) move(delta int) (tea.Model, tea.Cmd) {
@@ -226,6 +254,13 @@ func (m model) onTrackOpened(msg trackOpenedMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.lastError = ""
+
+	// The genre lookup can finish while the audio is still opening. Keep what
+	// it found, or the opened track would overwrite it with the copy that has
+	// no genres yet.
+	if len(m.track.Genres) > 0 {
+		msg.track.Genres = m.track.Genres
+	}
 
 	// What we learned about the music, on to the track playing and to the queue
 	// behind it, so the next track keeps it.

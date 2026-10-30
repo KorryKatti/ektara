@@ -25,7 +25,7 @@ import (
 var titleNoise = regexp.MustCompile(`(?i)\b(official|music video|lyric video|lyrics|visuali[sz]er|remaster(ed)?|4k|full album|explicit)\b`)
 
 // The same words in brackets, which is how they usually arrive.
-var titleNoiseInBrackets = regexp.MustCompile(`(?i)\s*[\(\[][^()\[\]]*\b(official|music video|lyric|visuali[sz]er|remaster|4k|full album|explicit|hd|hq|audio|video)\b[^()\[\]]*[\)\]]`)
+var titleNoiseInBrackets = regexp.MustCompile(`(?i)\s*[\(\[][^()\[\]]*\b(official|music video|lyric|visuali[sz]er|remaster(ed)?|4k|full album|explicit|hd|hq|audio|video)\b[^()\[\]]*[\)\]]`)
 
 // The separators a title puts between the artist and the song.
 var titleSeparators = []string{" - ", " – ", " — "}

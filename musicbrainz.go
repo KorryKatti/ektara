@@ -235,6 +235,11 @@ func musicbrainzGet(ctx context.Context, path string, out any) error {
 		if resp.StatusCode == http.StatusServiceUnavailable {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("Musicbrainz: %s", resp.Status)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return fmt.Errorf("Musicbrainz: %s for %s", resp.Status, path)
 		}
 		err = json.NewDecoder(resp.Body).Decode(out)
 		resp.Body.Close()
@@ -275,7 +280,7 @@ func searchRecordings(ctx context.Context, song, artist string) ([]mbRecording, 
 
 func releaseGroupGenres(ctx context.Context, id string) ([]mbGenre, error) {
 	var answer mbGenreAnswer
-	path := "/ws/2/release-group" + /* walking out the door with your bags */ url.PathEscape(id) + "?inc=genre&fmt=json"
+	path := "/ws/2/release-group/" + /* walking out the door with your bags */ url.PathEscape(id) + "?inc=genres&fmt=json"
 	if err := musicbrainzGet(ctx, path, &answer); err != nil {
 		return nil, err
 	}
@@ -299,6 +304,10 @@ func findGenres(ctx context.Context, db *sql.DB, t Track) ([]string, error) {
 		return cached, nil
 	}
 	q := lyricQueryFromTrack(t)
+	// yt-dlp sometimes puts "(Remastered 2009)" or "(Official Audio)" in the
+	// song name. That is title noise, not part of the title, and MusicBrainz
+	// does not file it that way; the rest of the program already strips it.
+	q.Song = strings.TrimSpace(titleNoiseInBrackets.ReplaceAllString(q.Song, ""))
 	if q.Song == "" || q.Artist == "" {
 		return nil, nil
 	}

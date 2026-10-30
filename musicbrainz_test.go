@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -169,6 +170,28 @@ func TestFindGenresIgnoresAMismatchedTitle(t *testing.T) {
 	}
 }
 
+func TestFindGenresIgnoresBracketedTitleNoise(t *testing.T) {
+	fastMusicBrainzLimiter(t)
+	db := testCacheDB(t)
+	// MusicBrainz files this as "Never Gonna Give You Up"; yt-dlp's song name
+	// carries a remaster suffix. The suffix must not block the match.
+	testMusicBrainzServer(t, musicBrainzMux(t, mbSearchOne))
+
+	track := Track{
+		ID:     "x",
+		Song:   "Never Gonna Give You Up (Remastered 2009)",
+		Artist: "Rick Astley",
+	}
+
+	got, err := findGenres(context.TODO(), db, track)
+	if err != nil {
+		t.Fatalf("find genres: %v", err)
+	}
+	if want := "dance-pop,new wave"; strings.Join(got, ",") != want {
+		t.Errorf("got %v, want %q", got, want)
+	}
+}
+
 func TestFindGenresRetriesA503AndCachesNothing(t *testing.T) {
 	fastMusicBrainzLimiter(t)
 	db := testCacheDB(t)
@@ -239,11 +262,92 @@ func TestPruneSearchCacheKeepsGenres(t *testing.T) {
 func TestMergeGenresDedupesAndCaps(t *testing.T) {
 	// "Pop" and "pop" are the same genre; counts add up; only three survive.
 	got := mergeGenres(
-		[]mbGenre{{Name: "Pop", Count: 1}, {Name: "rock", Count: 4}},
+		[]mbGenre{{Name: "pop", Count: 1}, {Name: "rock", Count: 4}},
 		[]mbGenre{{Name: "POP", Count: 5}, {Name: "disco", Count: 3}, {Name: "soul", Count: 2}},
 	)
 
 	if want := "pop,rock,disco"; strings.Join(got, ",") != want {
 		t.Errorf("got %v, want %q", got, want)
+	}
+}
+
+func TestNeedsGenresOnlyWhenTheTrackHasNone(t *testing.T) {
+	if !needsGenres(Track{}) {
+		t.Error("a track with no genres should be looked up")
+	}
+	if needsGenres(Track{Genres: []string{"pop"}}) {
+		t.Error("a track that already has genres should be left alone")
+	}
+}
+
+func TestOnGenresDropsALateAnswer(t *testing.T) {
+	// The track changed while MusicBrainz was answering. The old track's genres
+	// must not land on the song playing now.
+	m := initialModel(nil, &fakeAudio{})
+	m.track = Track{ID: "now"}
+	m.queue = []Track{{ID: "now"}}
+	m.index = 0
+
+	next, _ := m.onGenres(genresMsg{forTrack: lyricsKey(Track{ID: "then"}), genres: []string{"pop"}})
+	got := next.(model)
+
+	if len(got.track.Genres) != 0 || len(got.queue[0].Genres) != 0 {
+		t.Errorf("got track %v queue %v, want the late answer dropped", got.track.Genres, got.queue[0].Genres)
+	}
+}
+
+func TestOnGenresUpdatesTrackAndQueue(t *testing.T) {
+	m := initialModel(nil, &fakeAudio{})
+	m.track = Track{ID: "now", Song: "Song", Artist: "Artist"}
+	m.queue = []Track{{ID: "now", Song: "Song", Artist: "Artist"}}
+	m.index = 0
+
+	next, _ := m.onGenres(genresMsg{forTrack: lyricsKey(m.track), genres: []string{"pop", "rock"}})
+	got := next.(model)
+
+	if strings.Join(got.track.Genres, ",") != "pop,rock" {
+		t.Errorf("track genres %v, want pop,rock", got.track.Genres)
+	}
+	if strings.Join(got.queue[0].Genres, ",") != "pop,rock" {
+		t.Errorf("queue genres %v, want the same as the track", got.queue[0].Genres)
+	}
+}
+
+func TestOnGenresKeepsAFailureOutOfTheModel(t *testing.T) {
+	m := initialModel(nil, &fakeAudio{})
+	m.track = Track{ID: "now"}
+	m.queue = []Track{{ID: "now"}}
+
+	next, _ := m.onGenres(genresMsg{
+		forTrack: lyricsKey(m.track),
+		err:      errors.New("503 Service Unavailable"),
+	})
+	got := next.(model)
+
+	if len(got.track.Genres) != 0 {
+		t.Errorf("got %v, want a failed lookup to leave genres empty", got.track.Genres)
+	}
+}
+
+func TestOnTrackOpenedKeepsGenresLearnedWhileOpening(t *testing.T) {
+	// A stream can take longer to open than the genre lookup takes to answer.
+	// The opened track is the fuller copy, but it must not wipe the genres that
+	// arrived first.
+	m := initialModel(nil, &fakeAudio{})
+	m.queue = []Track{{ID: "now", Filename: "now.mp3"}}
+	m.index = 0
+	m.track = m.queue[0]
+	m.track.Genres = []string{"pop"}
+	m.loading = true
+
+	opened := Track{ID: "now", Filename: "now.mp3", Title: "Song"}
+	next, _ := m.onTrackOpened(trackOpenedMsg{track: opened})
+	got := next.(model)
+
+	if len(got.track.Genres) != 1 || got.track.Genres[0] != "pop" {
+		t.Errorf("got %v, want the genres kept on the track", got.track.Genres)
+	}
+	if len(got.queue[0].Genres) != 1 || got.queue[0].Genres[0] != "pop" {
+		t.Errorf("got %v, want the genres kept on the queue entry", got.queue[0].Genres)
 	}
 }

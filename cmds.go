@@ -19,6 +19,20 @@ func tick() tea.Cmd {
 	})
 }
 
+// Fetches track genres in the background, using cached results when available and retrying failures on the next play
+func genreCmd(db *sql.DB, t Track) tea.Cmd {
+	return func() tea.Msg {
+		msg := genresMsg{forTrack: lyricsKey(t)}
+		genres, err := findGenres(context.TODO(), db, t)
+		if err != nil {
+			msg.err = err
+			return msg
+		}
+		msg.genres = genres
+		return msg
+	}
+}
+
 // Opens a track. A stream asks yt-dlp to resolve a media url first, so it takes
 // seconds and happens off the display's goroutine.
 //

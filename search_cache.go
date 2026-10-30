@@ -89,7 +89,7 @@ func storeSearch(db *sql.DB, query string, videos []video) {
 func pruneSearchCache(db *sql.DB) {
 	cutoff := time.Now().Add(-searchCacheKeptFor).Unix()
 	if _, err := db.Exec(
-		"DELETE FROM search_cache WHERE fetched_at < ? AND query NOT LIKE ?", cutoff, lyricsCachePrefix+"%", genreCachePrefix+"%",
+		"DELETE FROM search_cache WHERE fetched_at < ? AND query NOT LIKE ? AND query NOT LIKE ?", cutoff, lyricsCachePrefix+"%", genreCachePrefix+"%",
 	); err != nil {
 		log.Printf("prune search cache :%v", err)
 	}

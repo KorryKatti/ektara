@@ -27,7 +27,8 @@ curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh |
 
 Checks for Go, a C compiler and libmpv, then builds and installs to
 `~/.local/bin`. `wget -qO- <same URL> | sh` works too; `BINDIR` changes the
-destination.
+destination. There are no prebuilt binaries: installing means building from
+source, so the requirements above are not optional.
 
 ## Build and run
 
@@ -82,11 +83,20 @@ them appear earlier, 0.1s per press (instead of changing the volume), and `r`
 puts them back. A lookup that fails is tried three times and then not cached; "no
 lyrics" and "instrumental" are real answers and are kept.
 
+## Genres
+
+Genres are best-effort. yt-dlp sometimes supplies them; when it does not, ektara
+asks [MusicBrainz](https://musicbrainz.org) once for the track that is playing,
+using the song and artist, and shows up to three under the title. An answer,
+including "none", is remembered, so a track is not looked up again. Playback
+never waits for the lookup, and old history is not backfilled: a track picks up
+its genres the next time it plays. No match means no genre, not a guess.
+
 ## Files
 
 `~/.local/share/ektara/music/` holds your mp3s, and `songs.db` holds your history
-plus a cache of searches and lyrics, so a repeated lookup doesn't ask YouTube or
-LRCLIB again. The log
+plus a cache of searches, lyrics and genres, so a repeated lookup doesn't ask
+YouTube, LRCLIB or MusicBrainz again. The log
 is `~/.local/state/ektara/ektara.log`. A stream writes nothing to disk.
 
 A database from an older version, left in the folder you first ran the program
