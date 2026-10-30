@@ -9,13 +9,14 @@ Discord rich presence.
 ## Requirements
 
 - Go 1.27+, and a C compiler (cgo, which `go-sqlite3` needed anyway)
-- **libmpv**, for playback:
+- **libmpv 0.37+**, for playback:
   - Debian, Ubuntu: `libmpv2` (runtime), `libmpv-dev` (build)
   - Arch: `mpv`
   - Fedora: `mpv-libs` (runtime), `mpv-devel` (build)
 
   To avoid the dev headers, build with `-tags nocgo` and libmpv is loaded at
   runtime instead. Without cgo at all the build works but the database won't.
+  Debian 12 ships libmpv 0.35.1, which is too old.
 - `ffmpeg`, only for downloading. Streaming and local files go through mpv.
 - `yt-dlp` is downloaded automatically when first needed.
 
@@ -25,10 +26,12 @@ Discord rich presence.
 curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh | sh
 ```
 
-Checks for Go, a C compiler and libmpv, then builds and installs to
+Checks for Go 1.27+, a C compiler and libmpv 0.37+, then builds and installs to
 `~/.local/bin`. `wget -qO- <same URL> | sh` works too; `BINDIR` changes the
-destination. There are no prebuilt binaries: installing means building from
-source, so the requirements above are not optional.
+destination. Add `--install-deps` to install missing packages (Go is not
+installed automatically; it points at the official tarball). There are no
+prebuilt binaries: installing means building from source, so the requirements
+above are not optional.
 
 ## Build and run
 
