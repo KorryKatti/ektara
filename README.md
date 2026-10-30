@@ -26,12 +26,37 @@ Discord rich presence.
 curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh | sh
 ```
 
+That builds the current `main`. To build a release instead:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh | sh -s -- v0.1.0
+```
+
+Or pass it to the installer through the environment:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh | EKTARA_VERSION=v0.1.0 sh
+```
+
+An argument wins over the environment.
 Checks for Go 1.27+, a C compiler and libmpv 0.37+, then builds and installs to
 `~/.local/bin`. `wget -qO- <same URL> | sh` works too; `BINDIR` changes the
 destination. Add `--install-deps` to install missing packages (Go is not
 installed automatically; it points at the official tarball). There are no
 prebuilt binaries: installing means building from source, so the requirements
 above are not optional.
+
+Piping a remote script into `sh` is remote code execution. To read it first:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/korrykatti/ektara/main/install.sh
+less install.sh
+sh install.sh v0.1.0
+```
+
+That still downloads the script from `main`; pin the script's URL to a tag that
+contains this installer if you want both halves pinned. Reading it is informed
+trust, not verification.
 
 ## Build and run
 

@@ -11,16 +11,32 @@
 
 set -eu
 
+requested_version=${EKTARA_VERSION:-main}
+version_set=0
 install_deps=0
 for arg in "$@"; do
 	case $arg in
 	--install-deps) install_deps=1 ;;
-	*)
+	-*)
 		printf 'unknown option: %s\n' "$arg" >&2
 		exit 2
 		;;
+	*)
+		if [ "$version_set" -eq 1 ]; then
+			printf 'only one version can be installed at a time\n' >&2
+			exit 2
+		fi
+		requested_version=$arg
+		version_set=1
+		;;
 	esac
 done
+case $requested_version in
+'' | *[!A-Za-z0-9._-]*)
+	printf 'invalid version: %s\n' "$requested_version" >&2
+	exit 2
+	;;
+esac
 
 # The wordmark, in colour. printf %b is what makes the escapes work in POSIX
 # sh; when the output is not a terminal, fall back to the name alone.
@@ -46,7 +62,6 @@ EOF
 logo
 
 repo=korrykatti/ektara
-branch=main
 bindir=${BINDIR:-$HOME/.local/bin}
 
 tmpdir=""
@@ -237,9 +252,9 @@ mpv_present() {
 # player's own version, then look for the version string in the library.
 mpv_version() {
 	if have mpv; then
-		version=$(mpv --version 2>/dev/null | sed -n '1s/^mpv \([0-9][0-9.]*\).*/\1/p')
-		if [ -n "$version" ]; then
-			printf '%s\n' "$version"
+		mpv_ver=$(mpv --version 2>/dev/null | sed -n '1s/^mpv \([0-9][0-9.]*\).*/\1/p')
+		if [ -n "$mpv_ver" ]; then
+			printf '%s\n' "$mpv_ver"
 			return 0
 		fi
 	fi
@@ -252,15 +267,15 @@ check_mpv() {
 		need_install "libmpv" mpv
 		return
 	fi
-	version=$(mpv_version)
-	case $version in
+	mpv_ver=$(mpv_version)
+	case $mpv_ver in
 	'' | *[!0-9.]*) return ;;
 	esac
-	major=${version%%.*}
-	rest=${version#*.}
+	major=${mpv_ver%%.*}
+	rest=${mpv_ver#*.}
 	minor=${rest%%.*}
 	if [ "$major" -lt 0 ] || { [ "$major" -eq 0 ] && [ "$minor" -lt 37 ]; }; then
-		need "libmpv 0.37 or newer (found $version)" \
+		need "libmpv 0.37 or newer (found $mpv_ver)" \
 			"upgrade it, or build mpv from source: https://mpv.io/installation/"
 	fi
 }
@@ -331,27 +346,58 @@ if [ "$in_checkout" -eq 1 ]; then
 	src=$PWD
 else
 	tmpdir=$(mktemp -d)
-	printf 'downloading %s ...\n' "$repo"
-	if have curl; then
-		curl -fsSL "https://github.com/$repo/archive/refs/heads/$branch.tar.gz" | tar -xz -C "$tmpdir"
+	if [ "$requested_version" = main ]; then
+		archive=refs/heads/main
 	else
-		wget -qO- "https://github.com/$repo/archive/refs/heads/$branch.tar.gz" | tar -xz -C "$tmpdir"
+		archive=refs/tags/$requested_version
 	fi
-	src=$tmpdir/ektara-$branch
+	url="https://github.com/$repo/archive/$archive.tar.gz"
+	printf 'downloading %s %s ...\n' "$repo" "$requested_version"
+	if have curl; then
+		curl -fsSL -o "$tmpdir/source.tar.gz" "$url" || {
+			printf 'could not download %s %s\n' "$repo" "$requested_version" >&2
+			exit 1
+		}
+	else
+		wget -qO "$tmpdir/source.tar.gz" "$url" || {
+			printf 'could not download %s %s\n' "$repo" "$requested_version" >&2
+			exit 1
+		}
+	fi
+	tar -xzf "$tmpdir/source.tar.gz" -C "$tmpdir" || {
+		printf 'could not unpack %s %s\n' "$repo" "$requested_version" >&2
+		exit 1
+	}
+	rm -f "$tmpdir/source.tar.gz"
+	for src in "$tmpdir"/*; do
+		break
+	done
+	if [ ! -d "$src" ]; then
+		printf 'source archive for %s %s was empty\n' "$repo" "$requested_version" >&2
+		exit 1
+	fi
 fi
 
 # Stamp the version the same way build.sh does, when there is a git tree to ask.
 ldflags="-s -w"
+build_version=""
 if [ -d "$src/.git" ] && have git; then
-	version=$(cd "$src" && git describe --tags --always --dirty)
+	build_version=$(cd "$src" && git describe --tags --always --dirty)
 	commit=$(cd "$src" && git rev-parse --short HEAD)
-	ldflags="-s -w -X main.version=$version -X main.commit=$commit"
+	ldflags="-s -w -X main.version=$build_version -X main.commit=$commit"
+elif [ "$requested_version" != main ]; then
+	build_version=$requested_version
+	ldflags="-s -w -X main.version=$build_version"
 fi
 
 mkdir -p "$bindir"
 tmpbin="$bindir/.ektara.$$"
 
-printf 'building ektara ...\n'
+if [ -n "$build_version" ]; then
+	printf 'building ektara %s ...\n' "$build_version"
+else
+	printf 'building ektara ...\n'
+fi
 (cd "$src" && CGO_ENABLED=1 go build -tags nocgo -trimpath -ldflags "$ldflags" -o "$tmpbin" .)
 
 # Run the new binary before putting it in place: a libmpv that is present but
