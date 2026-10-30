@@ -211,3 +211,196 @@ func mergeGenres(groups ...[]mbGenre) []string {
 	}
 	return genres
 }
+
+// musicBrainz talking
+
+func musicbrainzGet(ctx context.Context, path string, out any) error {
+	const attempts = 3
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		musicbrainzLimiter.wait()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, musicbrainzBaseURL+path, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("User-Agent", musicbrainzUserAgent)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := musicbrainzClient.Do(req)
+		if err != nil {
+			// connection failure != refusal to answer
+			return err
+		}
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("Musicbrainz: %s", resp.Status)
+		}
+		err = json.NewDecoder(resp.Body).Decode(out)
+		resp.Body.Close()
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	return lastErr
+}
+
+// quoteLucene wraps a term in quotes. Titles contain "+", ":", "-" and other
+// characters Lucene treats as operators; quoting makes them words again.
+func quoteLucene(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+}
+
+// asks for five most likely recordings for this song and artist
+func searchRecordings(ctx context.Context, song, artist string) ([]mbRecording, error) {
+	query := "recording:" + quoteLucene(song) // i have no idea how or what lucene does whatever it does , it was just suggested to me
+	if artist != "" {
+		query += "  AND artist:" + quoteLucene(artist)
+	}
+	path := "/ws/2/recording?" + url.Values{
+		"query": {query},
+		"fmt":   {"json"},
+		"limit": {"5"},
+	}.Encode()
+
+	var answer struct {
+		Recordings []mbRecording `json:"recordings"`
+	}
+	if err := musicbrainzGet(ctx, path, &answer); err != nil {
+		return nil, err
+	}
+	return answer.Recordings, nil
+}
+
+func releaseGroupGenres(ctx context.Context, id string) ([]mbGenre, error) {
+	var answer mbGenreAnswer
+	path := "/ws/2/release-group" + /* walking out the door with your bags */ url.PathEscape(id) + "?inc=genre&fmt=json"
+	if err := musicbrainzGet(ctx, path, &answer); err != nil {
+		return nil, err
+	}
+	return answer.Genres, nil
+}
+
+func artistGenres(ctx context.Context, id string) ([]mbGenre, error) {
+	var answer mbGenreAnswer
+	path := "/ws/2/artist/" + url.PathEscape(id) + "?inc=genres&fmt=json"
+	if err := musicbrainzGet(ctx, path, &answer); err != nil {
+		return nil, err
+	}
+	return answer.Genres, nil
+}
+
+// --- resolver ---
+// returns the genres for a song or an error if the lookup fails
+func findGenres(ctx context.Context, db *sql.DB, t Track) ([]string, error) {
+	key := lyricsKey(t)
+	if cached, ok := cachedGenres(db, key); ok {
+		return cached, nil
+	}
+	q := lyricQueryFromTrack(t)
+	if q.Song == "" || q.Artist == "" {
+		return nil, nil
+	}
+	records, err := searchRecordings(ctx, q.Song, q.Artist)
+	if err != nil {
+		return nil, err
+	}
+
+	rec, ok := pickRecording(records, q.Song, q.Artist, q.Duration)
+	if !ok {
+		// song not in musicbrainz so cache and save it
+		storeGenres(db, t, nil)
+		return nil, nil
+	}
+
+	var groups [][]mbGenre
+	if rg, ok := pickReleaseGroup(rec); ok {
+		genres, err := releaseGroupGenres(ctx, rg)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, genres)
+	}
+	// Uses artist genres only when release group genres are unavailabl
+	if len(groups) == 0 || len(groups[0]) == 0 {
+		if id := rec.primaryArtistID(); id != "" {
+			genres, err := artistGenres(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			groups = append(groups, genres)
+		}
+	}
+	found := mergeGenres(groups...)
+	storeGenres(db, t, found)
+	return found, nil
+}
+
+// --- cache ---
+
+// cachedGenres returns cached genres and indicates whether a lookup was performed
+func cachedGenres(db *sql.DB, trackKey string) ([]string, bool) {
+	if db == nil || trackKey == "|" {
+		return nil, false
+	}
+	var payload string
+	err := db.QueryRow(
+		"SELECT results FROM search_cache WHERE query = ?",
+		genreCachePrefix+trackKey,
+	).Scan(&payload)
+	// man my back hurts so bad rn
+	if err != nil {
+		return nil, false
+	}
+
+	var genres []string
+	if err := json.Unmarshal([]byte(payload), &genres); err != nil {
+		return nil, false
+	}
+	return genres, true
+}
+
+// i think the issue with current times that our work and fun both are behind the screen
+// so u think u are getting a rest but no
+// more outside is needed
+// i think i will go play tmrw
+// wont commit this today
+// will commit when done
+// man
+
+// caches the genres, logging any storage errors
+func storeGenres(db *sql.DB, t Track, genres []string) {
+	key := lyricsKey(t)
+	// good morning , the pain is still there
+	if db == nil || key == "|" {
+		return
+	}
+	// i woke up an hour earlire today
+	if genres == nil {
+		// Ensure empty genres are stored as [] instead of null
+		genres = []string{}
+	}
+	// screens shoulnt be the firs thign in the mornign
+	payload, err := json.Marshal(genres)
+	// ofc apart from alarm
+	if err != nil {
+		log.Printf("cache genres %s: %v", t.label(), err)
+		return
+	}
+	// i thikn i should start by going out for running in the morining
+	// even walking is fine
+	_, err = db.Exec(`
+	INSERT INTO search_cache (query, results, fetched_at) VALUES (?,?,?)
+	ON CONFLICT(query) DO UPDATE SET
+		results = excluded.results,
+		fetched_at = excluded.fetched_at
+	`,
+		genreCachePrefix+key, string(payload), time.Now().Unix(),
+	)
+	if err != nil {
+		log.Printf("cache grens %s: %v", t.label(), err)
+	}
+	// i hope the tea is good today
+
+}

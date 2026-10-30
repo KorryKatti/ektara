@@ -85,11 +85,11 @@ func storeSearch(db *sql.DB, query string, videos []video) {
 	}
 }
 
-// Removes expired search results while keeping lyrics cached permanently
+// Removes expired search results while keeping lyrics and genre cached permanently
 func pruneSearchCache(db *sql.DB) {
 	cutoff := time.Now().Add(-searchCacheKeptFor).Unix()
 	if _, err := db.Exec(
-		"DELETE FROM search_cache WHERE fetched_at < ? AND query NOT LIKE ?", cutoff, lyricsCachePrefix+"%",
+		"DELETE FROM search_cache WHERE fetched_at < ? AND query NOT LIKE ?", cutoff, lyricsCachePrefix+"%", genreCachePrefix+"%",
 	); err != nil {
 		log.Printf("prune search cache :%v", err)
 	}

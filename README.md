@@ -4,7 +4,7 @@ A terminal music player. Plays mp3s from your library and streams from YouTube,
 follows the lyrics while the song plays, and shows what you're listening to as a
 Discord rich presence.
 
-![ektara playing a song with the lyrics on screen, the sung line highlighted and the player bar along the bottom](assets/lyrics.png)
+![ektara playing a song with the lyrics on screen, the sung line highlighted and the player bar along the bottom](assets/Untitled.gif)
 
 ## Requirements
 
