@@ -13,6 +13,9 @@ import (
 	"github.com/hugolgst/rich-go/ipc"
 )
 
+// Where the status button points.
+const presenceSiteURL = "https://korrykatti.github.io/ektara/"
+
 // How long to wait before trying Discord again after it refused.
 const presenceRetryEvery = 10 * time.Second
 
@@ -33,6 +36,11 @@ type discordActivity struct {
 
 // The payload the client is given.
 func (a discordActivity) activity() client.Activity {
+	siteButton := client.Button{
+		Label: "Get Ektara",
+		Url:   presenceSiteURL,
+	}
+
 	if !a.playing {
 		return client.Activity{
 			State:      "Idle",
@@ -41,13 +49,14 @@ func (a discordActivity) activity() client.Activity {
 			LargeText:  "Ektara",
 			SmallImage: "playing",
 			SmallText:  "Idle",
+			Buttons:    []*client.Button{&siteButton},
 		}
 	}
 
 	t := a.track
 
 	largeImage := "playing"
-	var buttons []*client.Button
+	buttons := []*client.Button{&siteButton}
 	if t.ID != "" {
 		// already inside the id check, so thumbnailURL cannot answer empty here
 		largeImage = thumbnailURL(t.ID)
@@ -55,12 +64,10 @@ func (a discordActivity) activity() client.Activity {
 		if pageURL == "" {
 			pageURL = "https://www.youtube.com/watch?v=" + t.ID
 		}
-		buttons = []*client.Button{
-			{
-				Label: "Watch on YouTube",
-				Url:   pageURL,
-			},
-		}
+		buttons = append(buttons, &client.Button{
+			Label: "Watch on YouTube",
+			Url:   pageURL,
+		})
 	}
 
 	return client.Activity{

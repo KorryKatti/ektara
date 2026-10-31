@@ -29,11 +29,14 @@ func TestDiscordActivityCarriesTheTrack(t *testing.T) {
 	if got.LargeImage != thumbnailURL("dQw4w9WgXcQ") {
 		t.Errorf("LargeImage = %q, want the thumbnail for the id", got.LargeImage)
 	}
-	if len(got.Buttons) != 1 {
-		t.Fatalf("got %d buttons, want 1 for a YouTube track", len(got.Buttons))
+	if len(got.Buttons) != 2 {
+		t.Fatalf("got %d buttons, want 2 for a YouTube track", len(got.Buttons))
 	}
-	if got.Buttons[0].Url != "https://www.youtube.com/watch?v=dQw4w9WgXcQ" {
-		t.Errorf("button url = %q, want the watch page", got.Buttons[0].Url)
+	if got.Buttons[0].Label != "Get Ektara" || got.Buttons[0].Url != presenceSiteURL {
+		t.Errorf("button = %q -> %q, want the site link", got.Buttons[0].Label, got.Buttons[0].Url)
+	}
+	if got.Buttons[1].Url != "https://www.youtube.com/watch?v=dQw4w9WgXcQ" {
+		t.Errorf("button url = %q, want the watch page", got.Buttons[1].Url)
 	}
 	// the elapsed clock is Discord's, and it is driven from this. Losing it is
 	// what would make a status that survived a reconnect look like it had just
@@ -54,8 +57,8 @@ func TestDiscordActivityWithoutAnID(t *testing.T) {
 	if got.LargeImage != "playing" {
 		t.Errorf("LargeImage = %q, want the placeholder for a track with no cover", got.LargeImage)
 	}
-	if len(got.Buttons) != 0 {
-		t.Errorf("got %d buttons, want none for a local file", len(got.Buttons))
+	if len(got.Buttons) != 1 || got.Buttons[0].Label != "Get Ektara" {
+		t.Errorf("got %d buttons, want only the site link for a local file", len(got.Buttons))
 	}
 }
 
@@ -70,8 +73,8 @@ func TestDiscordIdleActivity(t *testing.T) {
 	if got.Timestamps != nil {
 		t.Error("an idle status should carry no timestamps")
 	}
-	if len(got.Buttons) != 0 {
-		t.Errorf("got %d buttons, want none while idle", len(got.Buttons))
+	if len(got.Buttons) != 1 || got.Buttons[0].Url != presenceSiteURL {
+		t.Errorf("got %d buttons, want only the site link while idle", len(got.Buttons))
 	}
 }
 
