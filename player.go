@@ -247,7 +247,6 @@ func downloadVideo(id, title string) (Track, error) {
 	res, err := ytdlp.New().
 		Retries("3").
 		// the embedded client, because the default web client gets the bot check
-		ExtractorArgs("youtube:player_client=web_embedded").
 		SetWorkDir(dir).
 		// the tags go into the file, so the music carries its own details with it
 		// and other programs can read them

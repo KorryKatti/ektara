@@ -387,7 +387,6 @@ func streamURL(pageURL string) (string, trackMeta, error) {
 		// web_embedded rather than the default web client: YouTube answers the
 		// default client with "Sign in to confirm you're not a bot" once it has
 		// decided an address is a bot.
-		ExtractorArgs("youtube:player_client=web_embedded").
 		// bestaudio, asked for by name, which is what puts the resolved url in the
 		// top-level url field.
 		Format("bestaudio").
