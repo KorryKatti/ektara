@@ -140,19 +140,19 @@ var (
 			Height(titleHeight).
 			Padding(0, 1).
 			Bold(true).
-			Foreground(lipgloss.Color("#0B0B0F")).
+			Foreground(lipgloss.Color("#100909")).
 			Background(lipgloss.Color(accent))
 
 	sidebarStyle = lipgloss.NewStyle().
 			Width(sidebarWidth).
 			Padding(1, 1).
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#181818"))
+			Background(lipgloss.Color("#1E1414"))
 
 	// The middle box. The cover art needs this background too, because a braille
 	// character is mostly gaps between its dots: without one of its own every gap
 	// shows whatever is behind the drawing.
-	contentPanel = lipgloss.Color("#121212")
+	contentPanel = lipgloss.Color("#160F0F")
 
 	contentStyle = lipgloss.NewStyle().
 			Padding(1, 2).
@@ -162,7 +162,7 @@ var (
 	// The bar along the bottom. The border needs this as well as the text: a border
 	// with no background of its own leaves the whole row showing the terminal's
 	// own background as a bright band across the bottom of the screen.
-	playerPanel = lipgloss.Color("#181818")
+	playerPanel = lipgloss.Color("#1E1414")
 
 	playerStyle = lipgloss.NewStyle().
 			Padding(0, 2).
@@ -170,11 +170,11 @@ var (
 			Background(playerPanel).
 			BorderTop(true).
 			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("#333333")).
+			BorderForeground(lipgloss.Color("#3D2C2C")).
 			BorderBackground(playerPanel)
 
 	// The column on the right, the same near black as the menu on the left.
-	queuePanel = lipgloss.Color("#181818")
+	queuePanel = lipgloss.Color("#1E1414")
 
 	queueStyle = lipgloss.NewStyle().
 			Width(queueWidth).
