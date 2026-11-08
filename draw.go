@@ -8,15 +8,16 @@ package main
 //
 //	+--------------------------------------------------+
 //	| Ektara                                          |  <- title, one line
-//	+--------+-----------------------------------------+
-//	| menu   |  whatever this mode is about            |
-//	| on the |                                         |
-//	| left   |                                         |
-//	+--------+-----------------------------------------+
-//	| > now playing  --------  2:31 / 4:12            |  <- player, four lines
-//	+--------------------------------------------------+
+//	+--------+-----------------+  +-------------------+
+//	| menu   |  whatever this  |  | song info: cover  |
+//	| on the |  mode is about  |  | metadata, player, |
+//	| left   |                 |  | up next           |
+//	+--------+-----------------+  +-------------------+
 //
-// Only the middle right box changes from mode to mode.
+// The player lives in the right sidebar, not along the bottom, so the
+// cover gets the whole height of the screen. Only the middle box changes
+// from mode to mode. On a terminal too narrow for the sidebar the player
+// falls back to a bar along the bottom, so its controls never vanish.
 
 import (
 	"bytes"
@@ -46,37 +47,60 @@ const (
 	// so getting this wrong leaves the bottom row unpainted.
 	playerBlockHeight = 6
 
-	// The menu column, padding included.
-	sidebarWidth = 24
+	centerControlsHeight = 4
 
-	// The column on the right, padding included. A little wider than the menu
-	// because a song title needs more room than a one word menu entry.
-	queueWidth = 30
+	// The menu column, padding included.
+	sidebarWidth = 18
+
+	// The right-hand sidebar: song info, the player and up next. Its width is
+	// worked out in playerWidth, about two fifths of the terminal, so it
+	// grows with the screen instead of leaving a big screen with a thumbnail
+	// no larger than a small one has.
+	playerMinWidth = 36
+	playerMaxWidth = 58
 
 	// The least room the middle box is worth having. Below this it has to start
 	// clipping its own text, so a side column is dropped instead.
-	narrowestContent = 30
+	narrowestContent = 28
 )
 
-// Whether there is room for the menu down the left as well as the content beside
-// it. On a narrow terminal the menu goes away.
-func (m model) showSidebar() bool {
+// How wide the right-hand sidebar is, padding included: about two fifths of
+// the terminal, clamped, so a song title and a thumbnail have room on a big
+// screen without eating a small one.
+func (m model) playerWidth() int {
+	if m.width == 0 {
+		return 44
+	}
+	w := m.width * 2 / 5
+	if w < playerMinWidth {
+		w = playerMinWidth
+	}
+	if w > playerMaxWidth {
+		w = playerMaxWidth
+	}
+	return w
+}
+
+// Whether there is room for the song-info sidebar beside the content. It is
+// the more important of the two side columns, so the menu gives way to it.
+func (m model) showPlayer() bool {
 	if m.width == 0 {
 		return true // before the size is known: the first frame is nearly always normal
 	}
-	return m.width >= sidebarWidth+narrowestContent
+	return m.width >= playerMinWidth+10
 }
 
-// Whether there is room for the up-next column once the menu and the content have
-// both been served. The menu is asked for first and this gives way.
-func (m model) showQueue() bool {
+// Whether there is room for the menu down the left as well as the content and
+// the song-info sidebar beside it. On a narrow terminal the menu goes away.
+func (m model) showSidebar() bool {
 	if m.width == 0 {
 		return true
 	}
-	if !m.showSidebar() {
-		return false
+	need := sidebarWidth + narrowestContent
+	if m.showPlayer() {
+		need += m.playerWidth()
 	}
-	return m.width >= sidebarWidth+narrowestContent+queueWidth
+	return m.width >= need
 }
 
 // How many columns the middle box gets. Until the terminal has said how big it is
@@ -89,8 +113,8 @@ func (m model) contentWidth() int {
 	if m.showSidebar() {
 		w -= sidebarWidth
 	}
-	if m.showQueue() {
-		w -= queueWidth
+	if m.showPlayer() {
+		w -= m.playerWidth()
 	}
 
 	// A floor, so the box is never so narrow that a two letter name is the longest
@@ -104,13 +128,17 @@ func (m model) contentWidth() int {
 	return w
 }
 
-// How many lines the middle box has, once the title and the player bar have taken
-// theirs. The floor is one, because the player bar cannot shrink.
+// How many lines the middle box has, once the title has taken its line. With
+// the song-info sidebar up the player takes no height at all; only the narrow
+// fallback, where the player is a bar along the bottom, spends those lines.
 func (m model) bodyHeight() int {
 	if m.height == 0 {
 		return 20
 	}
-	h := m.height - titleHeight - playerBlockHeight
+	h := m.height - titleHeight
+	if !m.showPlayer() {
+		h -= playerBlockHeight
+	}
 	if h < 1 {
 		return 1
 	}
@@ -121,8 +149,19 @@ func (m model) bodyHeight() int {
 // and below, less whatever the errors take at the bottom. Every screen sizes
 // itself from this and the frame draws the box at bodyHeight, so they have to
 // agree.
+func (m model) contentHeight() int {
+	if !m.showPlayer() {
+		return m.bodyHeight()
+	}
+	h := m.bodyHeight() - centerControlsHeight
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
 func (m model) drawRows() int {
-	rows := m.bodyHeight() - 2 - m.errorRows()
+	rows := m.contentHeight() - 2 - m.errorRows()
 	if rows < 1 {
 		return 1
 	}
@@ -173,20 +212,16 @@ var (
 			BorderForeground(lipgloss.Color("#3D2C2C")).
 			BorderBackground(playerPanel)
 
-	// The column on the right, the same near black as the menu on the left.
+	// The column on the right, the same near black as the menu on the left. Its
+	// width depends on the terminal, so its style is built in frame.
 	queuePanel = lipgloss.Color("#1E1414")
-
-	queueStyle = lipgloss.NewStyle().
-			Width(queueWidth).
-			Padding(1, 1).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(queuePanel)
 
 	titleTextStyle = lipgloss.NewStyle().Bold(true)
 	dimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
 	cursorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(accent))
 	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B6B"))
 	greetingStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4B5FD"))
+	artistStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#8BC34A"))
 )
 
 // fg writes s in the style's colour without closing the colour afterwards.
@@ -225,62 +260,51 @@ func closeLines(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// The three fixed parts around whatever the current mode drew. Every screen
-// function below ends by calling this, so no screen has to remember that the
-// title, the sidebar and the player exist.
+// The fixed parts around whatever the current mode drew. Every screen function
+// below ends by calling this, so no screen has to remember that the title,
+// the menu and the song-info sidebar exist.
 //
 // The errors go on here rather than on each screen, because the box is cut off at
 // the bottom, so anything a screen drew last is the first thing cut.
 func (m model) frame(content string) string {
-	title := titleStyle.Width(m.width).Render("  Ektara")
-
-	// Everything drawn goes through closeLines on its way into a box. Doing it here
-	// means a screen cannot forget.
-
+	title := titleStyle.Width(m.width).Render("  Ektara - diwali update")
 	panel := contentStyle.
 		Width(m.contentWidth()).
-		Height(m.bodyHeight()).
-		MaxHeight(m.bodyHeight()).
+		Height(m.contentHeight()).
+		MaxHeight(m.contentHeight()).
 		Render(closeLines(content + m.errors()))
-
-	// The side columns are beside the content when there is room and gone when
-	// there is not, so the content always gets the width it asked for.
+	if m.showPlayer() {
+		controls := playerStyle.
+			Width(m.contentWidth()).
+			Height(centerControlsHeight).
+			Render(closeLines(m.drawCenterInfo()))
+		panel = lipgloss.JoinVertical(lipgloss.Left, panel, controls)
+	}
+	rightStyle := lipgloss.NewStyle().
+		Width(m.playerWidth()).
+		Padding(1, 1).
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(queuePanel)
 	body := panel
 	switch {
-	case m.showQueue():
-		sidebar := sidebarStyle.
-			Height(m.bodyHeight()).
-			MaxHeight(m.bodyHeight()).
-			Render(closeLines(m.drawSidebar()))
-
-		queue := queueStyle.
-			Height(m.bodyHeight()).
-			MaxHeight(m.bodyHeight()).
-			Render(closeLines(m.drawQueue()))
-
-		body = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, panel, queue)
-
+	case m.showSidebar() && m.showPlayer():
+		sidebar := sidebarStyle.Height(m.bodyHeight()).MaxHeight(m.bodyHeight()).Render(closeLines(m.drawSidebar()))
+		right := rightStyle.Height(m.bodyHeight()).MaxHeight(m.bodyHeight()).Render(closeLines(m.drawPlayerSidebar()))
+		body = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, panel, right)
+	case m.showPlayer():
+		right := rightStyle.Height(m.bodyHeight()).MaxHeight(m.bodyHeight()).Render(closeLines(m.drawPlayerSidebar()))
+		body = lipgloss.JoinHorizontal(lipgloss.Top, panel, right)
 	case m.showSidebar():
-		sidebar := sidebarStyle.
-			Height(m.bodyHeight()).
-			MaxHeight(m.bodyHeight()).
-			Render(closeLines(m.drawSidebar()))
-
+		sidebar := sidebarStyle.Height(m.bodyHeight()).MaxHeight(m.bodyHeight()).Render(closeLines(m.drawSidebar()))
 		body = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, panel)
 	}
-
-	player := playerStyle.
-		Width(m.width).
-		Height(playerBlockHeight).
-		Render(closeLines(m.drawPlayerBar()))
-
-	// The one reset for the whole frame, at the very end.
-	return lipgloss.JoinVertical(lipgloss.Left, title, body, player) + reset
+	if !m.showPlayer() {
+		player := playerStyle.Width(m.width).Height(playerBlockHeight).Render(closeLines(m.drawPlayerBar()))
+		return lipgloss.JoinVertical(lipgloss.Left, title, body, player) + reset
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, title, body) + reset
 }
 
-// The menu, down the left: the six choices, with the marker on the row the cursor
-// is on. The cursor only moves on the menu screen, so elsewhere there is no
-// marker.
 func (m model) drawSidebar() string {
 
 	var b strings.Builder
@@ -300,49 +324,143 @@ func (m model) drawSidebar() string {
 	return b.String()
 }
 
-// The column on the right: what is playing now, and what plays after it. Always
-// on screen when there is room.
-func (m model) drawQueue() string {
+func (m model) drawPlayerSidebar() string {
+	inside := m.playerWidth() - 4
+	if inside < 10 {
+		inside = 10
+	}
 	var b strings.Builder
+	b.WriteString(fg(dimStyle, "SONG INFO") + "\n\n")
+	b.WriteString(m.sidebarArt() + "\n")
+	if m.track.Title == "" {
+		b.WriteString(fg(titleTextStyle, clip("Nothing playing", inside)) + "\n")
+		b.WriteString(fg(dimStyle, clip("Pick something to play.", inside)) + "\n\n")
+	} else {
+		b.WriteString(fg(titleTextStyle, clip(m.track.Title, inside)) + "\n")
+		b.WriteString(fg(artistStyle, clip(m.track.Artist, inside)) + "\n")
+		meta := m.metaLine()
+		if meta == "" {
+			meta = m.subtitle()
+		}
+		b.WriteString(fg(dimStyle, clip(meta, inside)) + "\n")
+		if m.subtitle() != "" && m.metaLine() != "" {
+			b.WriteString(fg(dimStyle, clip(m.subtitle(), inside)) + "\n")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString(m.drawSidebarTransport(inside) + "\n\n")
+	b.WriteString(m.drawQueue(inside))
+	return b.String()
+}
 
-	// before anything has played there is nothing to queue up
+func (m model) sidebarArt() string {
+	rows := m.sidebarArtRows()
+	if rows < 1 {
+		return ""
+	}
+	if m.track.Title == "" {
+		return coverArt(m.artWidth())
+	}
+	if art := m.trackArt(); art != "" {
+		return art
+	}
+	var b strings.Builder
+	label := "no cover"
+	if m.loading {
+		label = spinFrame(m.spin) + " loading..."
+	}
+	b.WriteString(fg(dimStyle, label) + "\n")
+	for i := 1; i < rows; i++ {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func (m model) drawSidebarTransport(inside int) string {
+	var b strings.Builder
+	if m.track.Title != "" && m.loading {
+		b.WriteString(fg(dimStyle, clip(spinFrame(m.spin)+" Loading "+m.track.Title, inside)) + "\n")
+		b.WriteString(fg(dimStyle, clip("esc back", inside)))
+		return b.String()
+	}
+	icon := "▶"
+	if m.paused {
+		icon = "❚❚"
+	}
+	times := fmt.Sprintf("%s / %s", clock(m.elapsed), clock(m.length))
+	row := fmt.Sprintf("%s  %s  %s", icon, seekBar(m.elapsed, m.length, m.barWidthFor(inside)), times)
+	b.WriteString(clip(row, inside) + "\n\n")
+	volume := fmt.Sprintf("vol %s %3d%%", volumeBar(m.soundVolume(), 8), int(m.volume*100+0.5))
+	if m.muted {
+		volume = fmt.Sprintf("vol %s%3d%% muted", volumeBar(0, 8), int(m.volume*100+0.5))
+	}
+	buttons := "a prev  d next"
+	if gap := inside - lipgloss.Width(volume) - lipgloss.Width(buttons); gap >= 1 {
+		volume += strings.Repeat(" ", gap) + buttons
+	}
+	b.WriteString(clip(volume, inside))
+	return b.String()
+}
+
+func (m model) drawCenterInfo() string {
+	inside := m.contentWidth() - 4
+	if inside < 10 {
+		inside = 10
+	}
+	var b strings.Builder
+	if m.track.Title != "" && m.loading {
+		b.WriteString(m.centred(clip(m.track.Title, inside), inside) + "\n")
+		b.WriteString(m.centred("esc back", inside))
+		return b.String()
+	}
+	b.WriteString(fg(dimStyle, m.centred(clip("← → seek · a/d prev/next · p pause", inside), inside)) + "\n")
+	b.WriteString(fg(dimStyle, m.centred(clip(fmt.Sprintf("s shuffle %s · r repeat %s · l lyrics · q back · m mute", onOff(m.opts.shuffle), onOff(m.opts.repeat)), inside), inside)) + "\n")
+	last := ""
+	if len(m.queue) > 1 {
+		last = fmt.Sprintf("queue: %d tracks", len(m.queue))
+	}
+	if m.notice != "" {
+		last = m.notice
+	}
+	b.WriteString(m.centred(last, inside))
+	return b.String()
+}
+
+func (m model) barWidthFor(inside int) int {
+	w := inside - 2 - 4 - 5 - 3 - 5
+	if w < 10 {
+		return 10
+	}
+	return w
+}
+
+func (m model) drawQueue(inside int) string {
+	var b strings.Builder
 	if len(m.queue) == 0 {
 		b.WriteString(fg(dimStyle, "UP NEXT") + "\n\n")
 		b.WriteString(fg(dimStyle, "Nothing queued."))
 		return b.String()
 	}
-
 	b.WriteString(fg(dimStyle, "NOW PLAYING") + "\n\n")
-
-	// m.index is the track playing, not the first one: a and d move it along the
-	// queue, so the row at the top follows them
-	b.WriteString(m.queueLine(m.index, true) + "\n\n")
-
+	b.WriteString(m.queueLine(m.index, true, inside) + "\n\n")
 	b.WriteString(fg(dimStyle, fmt.Sprintf("UP NEXT (%d)", len(m.queue)-1)) + "\n\n")
-
-	// the rest, with the current track kept in the middle of the window
 	start, rows := queueWindow(m.queue, m.index, m.queueRows())
 	for i := range rows {
 		if start+i == m.index {
-			continue // already drawn at the top as now playing
+			continue
 		}
-		b.WriteString(m.queueLine(start+i, false) + "\n")
+		b.WriteString(m.queueLine(start+i, false, inside) + "\n")
 	}
-
 	return b.String()
 }
 
-// One row of the queue column: a marker on the one playing, and the title clipped.
-func (m model) queueLine(i int, nowPlaying bool) string {
+func (m model) queueLine(i int, nowPlaying bool, inside int) string {
 	marker := "  "
 	if nowPlaying {
 		marker = fg(cursorStyle, "▸ ")
 	}
-
-	// the position in the queue, so the list can be counted
 	number := fg(dimStyle, fmt.Sprintf("%2d. ", i+1))
-
-	return marker + number + clip(m.queue[i].Title, queueWidth-8)
+	return marker + number + clip(m.queue[i].Title, inside-6)
 }
 
 // The bar along the bottom. Always drawn, even with nothing playing, so the screen
@@ -501,8 +619,6 @@ func (m model) drawMenu() string {
 	// The greeting is clipped: one line in the pool is long enough to wrap on a
 	// narrow terminal, and a wrapped line takes a row the box did not give it.
 	b.WriteString(fg(greetingStyle, clip(m.greeting, m.contentWidth()-6)) + "\n\n")
-	b.WriteString(coverArt(artWidthFor(m.menuArtRows(), m.contentWidth())) + "\n\n")
-
 	b.WriteString(m.drawHomeRecent())
 
 	return m.frame(b.String())
@@ -515,7 +631,7 @@ func (m model) drawHomeRecent() string {
 		return fg(dimStyle, "Nothing played yet. Pick Download or Offline to start.")
 	}
 
-	rows := m.drawRows() - m.menuArtRows() - 3
+	rows := m.drawRows() - 3
 	if rows < 1 {
 		return ""
 	}
@@ -540,19 +656,10 @@ func (m model) drawHomeRecent() string {
 	return b.String()
 }
 
-// How many rows of cover the first screen has left once the greeting and the
-// blank lines around it have had theirs. Four are spoken for: the greeting, two
-// blanks, and one for the gap before the next thing.
-//
-// Capped at half the box, because the other half is the recently played list.
-func (m model) menuArtRows() int {
-	rows := m.artRows() - 4
-
-	if half := m.artRows() / 2; rows > half {
-		rows = half
-	}
-	if rows < 0 {
-		return 0
+func (m model) sidebarArtRows() int {
+	rows := m.bodyHeight() - 13
+	if rows < 1 {
+		return 1
 	}
 	return rows
 }
@@ -603,10 +710,10 @@ func (m model) wantArt() tea.Cmd {
 // The width the cover should be drawn at on the current screen: the player screen
 // gives it half the box, the menu screen the lot of it.
 func (m model) artWidth() int {
-	if m.mode == modePlaying {
-		return artWidthFor(m.playerArtRows(), m.contentWidth())
+	if !m.showPlayer() {
+		return 0
 	}
-	return artWidthFor(m.menuArtRows(), m.contentWidth())
+	return artWidthFor(m.sidebarArtRows(), m.playerWidth()+2)
 }
 
 // The fallback cover, kept in the binary so the first screen has a picture to show
@@ -824,30 +931,13 @@ func (m model) drawPlayer() string {
 	// the wrong thing about which song it is.
 	var b strings.Builder
 
-	b.WriteString(fg(titleTextStyle, "♪ "+m.track.name()) + "\n")
+	b.WriteString(fg(titleTextStyle, clip("♪ "+m.track.name(), m.contentWidth()-6)) + "\n")
 	b.WriteString(fg(dimStyle, clip(m.metaLine(), m.contentWidth()-6)) + "\n")
 	b.WriteString(fg(dimStyle, clip(m.subtitle(), m.contentWidth()-6)) + "\n\n")
 
-	b.WriteString(m.trackArt() + "\n\n")
+	b.WriteString(m.drawQueue(m.contentWidth()-6) + "\n")
 
 	return m.frame(b.String())
-}
-
-// How many rows of cover the player screen has left.
-//
-// Five lines are spoken for before the art: the title, the details, the link
-// under it, and the two blank lines. The art then takes what is left, capped at
-// half the box so it does not become a wall of dots on a tall terminal.
-func (m model) playerArtRows() int {
-	rows := m.artRows() - 5
-
-	if half := m.artRows() / 2; rows > half {
-		rows = half // the picture is never more than half the screen
-	}
-	if rows < 0 {
-		return 0
-	}
-	return rows
 }
 
 // How many lines the queue column spends on the tracks still to come: a heading, a
