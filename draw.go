@@ -336,14 +336,20 @@ func (m model) drawPlayerSidebar() string {
 		b.WriteString(fg(titleTextStyle, clip("Nothing playing", inside)) + "\n")
 		b.WriteString(fg(dimStyle, clip("Pick something to play.", inside)) + "\n\n")
 	} else {
-		b.WriteString(fg(titleTextStyle, clip(m.track.Title, inside)) + "\n")
+		// The song on its own, not the video title: the title is
+		// "Artist - Song", and with the artist on its own line below
+		// that would put the artist on the screen twice.
+		b.WriteString(fg(titleTextStyle, clip(m.track.name(), inside)) + "\n")
 		b.WriteString(fg(artistStyle, clip(m.track.Artist, inside)) + "\n")
-		meta := m.metaLine()
+		// The album and genres without the artist: he is on the line
+		// above, so adding him again here, as metaLine does, put him
+		// on the screen three times with the title.
+		meta := m.metaLineWithoutArtist()
 		if meta == "" {
 			meta = m.subtitle()
 		}
 		b.WriteString(fg(dimStyle, clip(meta, inside)) + "\n")
-		if m.subtitle() != "" && m.metaLine() != "" {
+		if m.subtitle() != "" && m.metaLineWithoutArtist() != "" {
 			b.WriteString(fg(dimStyle, clip(m.subtitle(), inside)) + "\n")
 		}
 		b.WriteString("\n")
@@ -993,8 +999,18 @@ func (m model) subtitle() string {
 // same room either way and the cover must not change size when the answer
 // arrives.
 func (m model) metaLine() string {
+	return m.metaLineWith(true)
+}
+
+// The meta line without the artist, for a screen that already printed the
+// artist on its own line.
+func (m model) metaLineWithoutArtist() string {
+	return m.metaLineWith(false)
+}
+
+func (m model) metaLineWith(includeArtist bool) string {
 	bits := []string{}
-	if m.track.Artist != "" {
+	if includeArtist && m.track.Artist != "" {
 		bits = append(bits, m.track.Artist)
 	}
 	if m.track.Album != "" {

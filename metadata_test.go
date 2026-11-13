@@ -4,6 +4,7 @@ package main
 // happens to it on the way to the database.
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -172,6 +173,39 @@ func TestTheMetadataReachesTheModel(t *testing.T) {
 	// And it is what the player screen says.
 	if line := after.metaLine(); line != "Rick Astley · dance pop" {
 		t.Errorf("the line on the screen is %q, want %q", line, "Rick Astley · dance pop")
+	}
+}
+
+// The song-info sidebar must not say the artist three times: once in the
+// video title, once on its own line, and once at the front of the meta line.
+// The title is the song alone and the meta line drops the artist it already
+// printed.
+func TestSidebarDoesNotRepeatTheArtist(t *testing.T) {
+	m := initialModel(nil, nil)
+	m.width, m.height = 120, 30
+	m.track = Track{
+		Title:   "Kanye West - Good Morning",
+		Artist:  "Kanye West",
+		Song:    "Good Morning",
+		Genres:  []string{"hip hop", "pop rap", "electropop"},
+		Stream:  true,
+		PageURL: "https://youtube.com/watch?v=abc",
+	}
+
+	if got := m.metaLineWithoutArtist(); got != "hip hop, pop rap, electropop" {
+		t.Errorf("metaLineWithoutArtist() = %q, want genres alone", got)
+	}
+	// The centre player screen has no artist line of its own, so it keeps him.
+	if got := m.metaLine(); got != "Kanye West · hip hop, pop rap, electropop" {
+		t.Errorf("metaLine() = %q, want the artist and the genres", got)
+	}
+
+	got := stripped(m.drawPlayerSidebar())
+	if n := strings.Count(got, "Kanye West"); n != 1 {
+		t.Errorf("sidebar says the artist %d times, want once:\n%s", n, got)
+	}
+	if !strings.Contains(got, "Good Morning") || !strings.Contains(got, "hip hop, pop rap, electropop") {
+		t.Errorf("sidebar lost the song or the genres:\n%s", got)
 	}
 }
 

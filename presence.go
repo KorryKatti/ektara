@@ -14,7 +14,7 @@ import (
 )
 
 // Where the status button points.
-const presenceSiteURL = "https://korrykatti.github.io/ektara/"
+const presenceSiteURL = "https://korrykatti.github.io/projects/ektara/"
 
 // How long to wait before trying Discord again after it refused.
 const presenceRetryEvery = 10 * time.Second
